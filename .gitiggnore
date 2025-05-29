@@ -1,0 +1,76 @@
+# Fichiers et dossiers Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.so
+pip-wheel-metadata/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.manifest
+*.spec
+
+# Environnements virtuels
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Fichiers de configuration spécifiques à l'IDE
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Fichiers de base de données SQLite
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal # Journal de SQLite
+
+# Fichiers de logs et de résultats temporaires
+logs/
+*.log
+results/
+optuna.db # Base de données Optuna
+optuna_journal.log # Journal de Optuna Storage
+
+# Données du projet (selon Architecture_Projet.pdf)
+data/historical/
+data/cache/
+# Ne pas ignorer data/ si des configurations ou des petits datasets y sont versionnés.
+# Les grands fichiers de données doivent être gérés via Git LFS ou stockés ailleurs.
+
+# Cache et rapports de tests/couverture
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Fichiers Jupyter Notebook
+.ipynb_checkpoints
+
+# Fichiers OS spécifiques
+.DS_Store
+Thumbs.db
+
+# Fichiers sensibles (le vrai .env sera créé manuellement et est déjà listé ci-dessus)
+# .env
+
+# Dépendances spécifiques (si installées localement et non via venv)
+# node_modules/
