@@ -1,0 +1,45 @@
+# Gestion des Données
+pandas>=1.5.3
+numpy>=1.24.0
+pyarrow>=16.0.0 # Version stable récente, ajustez si nécessaire
+python-binance>=1.0.19 # Client API Binance
+
+# Backtesting
+vectorbt>=0.26.0 # Backtesting vectoriel
+
+# Optimisation
+optuna>=3.5.0 # Framework d'optimisation
+
+# Calcul d'Indicateurs
+pandas-ta>=0.3.14b # Alternative à TA-Lib, plus facile à installer
+
+# Stockage
+SQLAlchemy>=2.0.0 # ORM pour bases de données (ex: PostgreSQL)
+psycopg2-binary>=2.9.0 # Adaptateur PostgreSQL pour Python
+redis>=5.0.0 # Client Redis pour caching
+
+# Logging et Monitoring
+loguru>=0.7.0 # Logging simplifié
+prometheus-client>=0.20.0 # Pour exposer des métriques (optionnel au début)
+
+# Configuration et Utilitaires
+pydantic>=2.5.0 # Validation de données et de configuration
+python-dotenv>=1.0.0 # Gestion des variables d'environnement (.env)
+click>=8.1.0 # Pour créer des interfaces en ligne de commande (CLI)
+
+# Tests
+pytest>=8.0.0 # Framework de tests
+pytest-asyncio>=0.23.0 # Pour tester le code asyncio
+pytest-mock>=3.12.0 # Fixture de mocking pour pytest
+
+# Optionnel: TA-Lib (si vous préférez à pandas-ta et pouvez gérer l'installation)
+# TA-Lib>=0.4.24 # Nécessite des dépendances C, peut être complexe à installer
+
+# Dépendances pour MyPy (stubs de types), si non gérées via pre-commit ou dev-requirements
+# pandas-stubs
+# types-redis
+# types-PyYAML
+# types-SQLAlchemy # Pour SQLAlchemy < 2.0 ou pour compléter
+# types-psycopg2
+# types-python-dotenv
+# types-click
