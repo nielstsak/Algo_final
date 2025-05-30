@@ -1,45 +1,54 @@
 # Gestion des Données
 pandas>=1.5.3
 numpy>=1.24.0
-pyarrow>=16.0.0 # Version stable récente, ajustez si nécessaire
-python-binance>=1.0.19 # Client API Binance
+pyarrow>=16.0.0 
+python-binance>=1.0.19
 
 # Backtesting
-vectorbt>=0.26.0 # Backtesting vectoriel
+vectorbt>=0.26.0
 
 # Optimisation
-optuna>=3.5.0 # Framework d'optimisation
+optuna>=3.5.0
 
 # Calcul d'Indicateurs
-pandas-ta>=0.3.14b # Alternative à TA-Lib, plus facile à installer
+pandas-ta>=0.3.14b
 
 # Stockage
-SQLAlchemy>=2.0.0 # ORM pour bases de données (ex: PostgreSQL)
-psycopg2-binary>=2.9.0 # Adaptateur PostgreSQL pour Python
-redis>=5.0.0 # Client Redis pour caching
+SQLAlchemy>=2.0.0 
+psycopg2-binary>=2.9.0 
+redis>=5.0.0 
+alembic>=1.13.0 
 
 # Logging et Monitoring
-loguru>=0.7.0 # Logging simplifié
-prometheus-client>=0.20.0 # Pour exposer des métriques (optionnel au début)
+loguru>=0.7.0 
+prometheus-client>=0.20.0 
 
 # Configuration et Utilitaires
-pydantic>=2.5.0 # Validation de données et de configuration
-python-dotenv>=1.0.0 # Gestion des variables d'environnement (.env)
-click>=8.1.0 # Pour créer des interfaces en ligne de commande (CLI)
+pydantic>=2.5.0 
+pydantic-settings>=2.0.0 
+python-dotenv>=1.0.0 
+click>=8.1.0 
+PyYAML>=6.0 
+
+# Réseau / API
+requests>=2.31.0  
+aiohttp>=3.9.0  
+# websockets # Si utilisation directe
 
 # Tests
-pytest>=8.0.0 # Framework de tests
-pytest-asyncio>=0.23.0 # Pour tester le code asyncio
-pytest-mock>=3.12.0 # Fixture de mocking pour pytest
+pytest>=8.0.0 
+pytest-asyncio>=0.23.0 
+pytest-mock>=3.12.0 
 
-# Optionnel: TA-Lib (si vous préférez à pandas-ta et pouvez gérer l'installation)
-# TA-Lib>=0.4.24 # Nécessite des dépendances C, peut être complexe à installer
+# Optionnel: TA-Lib
+# TA-Lib>=0.4.24
 
-# Dépendances pour MyPy (stubs de types), si non gérées via pre-commit ou dev-requirements
+# Stubs de types (gérés via pre-commit ou dev-requirements)
 # pandas-stubs
 # types-redis
 # types-PyYAML
-# types-SQLAlchemy # Pour SQLAlchemy < 2.0 ou pour compléter
+# types-SQLAlchemy
 # types-psycopg2
 # types-python-dotenv
 # types-click
+# types-requests
