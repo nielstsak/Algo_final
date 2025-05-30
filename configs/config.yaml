@@ -1,0 +1,81 @@
+# configs/config.yaml (Exemple minimal valide)
+
+app:
+  name: "Algo Trading Bot"
+  version: "1.0.1" # Version mise à jour pour l'exemple
+  environment: "development" # ou "production", "test"
+
+# Les clés API Binance doivent être dans votre fichier .env
+# et seront chargées par pydantic-settings ou via substitution si vous utilisez ${VAR_NAME} ici.
+# Pour pydantic-settings, il suffit que BINANCE__API_KEY et BINANCE__API_SECRET soient dans .env
+# Si vous n'utilisez pas la substitution ${...} ici, ces champs peuvent être omis du YAML
+# car pydantic-settings les prendra de l'environnement.
+binance:
+  # api_key: ${BINANCE_API_KEY} # Exemple de substitution, mais pydantic-settings est préféré
+  # api_secret: ${BINANCE_API_SECRET} # Exemple de substitution
+  testnet: false
+  # api_key_2: ${BINANCE_API_KEY_2} # Optionnel
+  # api_secret_2: ${BINANCE_API_SECRET_2} # Optionnel
+
+# Configuration de la base de données.
+# Si vous utilisez des variables d'environnement séparées (POSTGRES_USER, etc.),
+# la section 'database' dans YAML peut être minimale ou omise si les valeurs par défaut
+# dans DatabaseConfig (config.py) sont suffisantes ou si toutes les valeurs sont dans .env.
+# L'URL sera construite ou chargée par pydantic-settings.
+database:
+  db_type: "postgresql" # ou "sqlite"
+  # Pour PostgreSQL (si non entièrement défini dans .env):
+  # pg_host: "localhost"
+  # pg_port: 5432
+  # pg_user: "your_user"       # Mieux dans .env
+  # pg_password: "your_password" # Mieux dans .env
+  # pg_db: "algobot_db"
+  # Pour SQLite:
+  # sqlite_path: "data/algobot_local.db" # ou ":memory:"
+
+  # Options de pooling (valeurs par défaut de config.py seront utilisées si non spécifiées ici)
+  pool_size: 7
+  max_overflow: 12
+  # ... autres options de pooling et de retry si vous voulez les surcharger ...
+
+# Configuration des données
+data:
+  storage_type: "parquet" # ou "postgres"
+  storage_path: "data/crypto_klines" # Sera résolu en chemin absolu
+  parquet_partition_cols: ["pair", "year", "month"]
+  cache_enabled: true
+  cache_ttl: 3600 # 1 heure
+
+# Configuration du trading
+trading:
+  mode: "cross_margin"
+  base_currency: "USDC"
+  allowed_pairs:
+    - "BTCUSDC"
+    - "ETHUSDC"
+    # - "BNBUSDC" # Exemple
+
+# Configuration des risques (valeurs par défaut de config.py seront utilisées si non spécifiées)
+risk:
+  max_position_pct: 0.05 # 5%
+  # max_drawdown_pct: 0.20
+  # daily_loss_limit_pct: 0.10
+
+# Configuration du monitoring (valeurs par défaut de config.py seront utilisées si non spécifiées)
+monitoring:
+  prometheus_enabled: false
+  # prometheus_port: 9091
+  # alert_webhook_url: "YOUR_SLACK_OR_DISCORD_WEBHOOK_URL_HERE" # Mieux dans .env
+  log_level_console: "INFO"
+  log_level_file: "DEBUG"
+  log_to_file_enabled: true
+  # log_rotation: "100 MB"
+  # log_retention: "10 days"
+  # log_compression: "gz"
+
+# Section Redis optionnelle (valeurs par défaut de config.py seront utilisées si non spécifiées)
+# redis:
+#   host: "localhost"
+#   port: 6379
+#   # password: ${REDIS_PASSWORD} # Mieux dans .env
+
