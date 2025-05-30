@@ -49,7 +49,7 @@ class DatabaseConfigModel(BaseModel):
     pg_user: Optional[str] = None
     pg_password: Optional[SecretStr] = None
     pg_host: Optional[str] = "localhost"
-    pg_port: Optional[Union[int, str]] = 5432
+    pg_port: Optional[Union[int, str]] = 5434
     pg_db: Optional[str] = "algobot_db"
     sqlite_path: Optional[str] = None
 
@@ -74,8 +74,8 @@ class DatabaseConfigModel(BaseModel):
             pg_password_secret = values.get("pg_password")
             pg_password = pg_password_secret.get_secret_value() if isinstance(pg_password_secret, SecretStr) else pg_password_secret
             pg_host = values.get("pg_host", "localhost")
-            pg_port_val = values.get("pg_port", 5432)
-            pg_port = str(pg_port_val) if pg_port_val is not None else "5432"
+            pg_port_val = values.get("pg_port", 5434)
+            pg_port = str(pg_port_val) if pg_port_val is not None else "5434"
             pg_db = values.get("pg_db", "algobot_db")
 
             if all(val is not None for val in [pg_user, pg_password, pg_host, pg_db]):
@@ -268,7 +268,7 @@ class Settings(BaseSettings):
             "pg_user": values.get('POSTGRES_USER', database_yaml_data.get('pg_user')),
             "pg_password": values.get('POSTGRES_PASSWORD', database_yaml_data.get('pg_password')),
             "pg_host": values.get('POSTGRES_HOST', database_yaml_data.get('pg_host', "localhost")),
-            "pg_port": values.get('POSTGRES_PORT', database_yaml_data.get('pg_port', 5432)),
+            "pg_port": values.get('POSTGRES_PORT', database_yaml_data.get('pg_port', 5434)),
             "pg_db": values.get('POSTGRES_DB', database_yaml_data.get('pg_db', "algobot_db")),
             "sqlite_path": values.get('SQLITE_PATH', database_yaml_data.get('sqlite_path')),
             "url": values.get('DATABASE_URL', database_yaml_data.get('url')), # Important: .env DATABASE_URL a priorité

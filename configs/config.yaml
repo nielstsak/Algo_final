@@ -26,7 +26,7 @@ database:
   db_type: "postgresql" # ou "sqlite"
   # Pour PostgreSQL (si non entièrement défini dans .env):
   # pg_host: "localhost"
-  # pg_port: 5432
+  # pg_port: 5434
   # pg_user: "your_user"       # Mieux dans .env
   # pg_password: "your_password" # Mieux dans .env
   # pg_db: "algobot_db"
