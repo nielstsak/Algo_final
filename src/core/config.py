@@ -4,7 +4,7 @@ import yaml
 from pathlib import Path
 from typing import List, Literal, Optional, Any, Dict, Union
 from pydantic import (
-    BaseModel, 
+    BaseModel,
     Field,
     SecretStr,
     HttpUrl,
@@ -14,6 +14,7 @@ from pydantic import (
     PostgresDsn
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_core import PydanticCustomError
 
 from src.core.exceptions import (
     ConfigurationError,
@@ -25,23 +26,25 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_FILE_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
-# --- Modèles Pydantic pour la configuration (deviennent des BaseModel simples) ---
+PLACEHOLDER_WEBHOOK_URL = "YOUR_ALERT_WEBHOOK_URL_HERE"
+
+# --- Modèles Pydantic pour la configuration ---
 
 class AppConfig(BaseModel):
     name: str = "Algo Trading Bot"
     version: str = "1.0.0"
     environment: Literal['development', 'production', 'test'] = "development"
 
-class BinanceConfigModel(BaseModel): 
+class BinanceConfigModel(BaseModel):
     api_key: SecretStr
     api_secret: SecretStr
     testnet: bool = False
     api_key_2: Optional[SecretStr] = None
     api_secret_2: Optional[SecretStr] = None
 
-class DatabaseConfigModel(BaseModel): 
+class DatabaseConfigModel(BaseModel):
     db_type: Literal["postgresql", "sqlite"] = "postgresql"
-    url: Optional[Union[PostgresDsn, str]] = None 
+    url: Optional[Union[PostgresDsn, str]] = None
 
     pg_user: Optional[str] = None
     pg_password: Optional[SecretStr] = None
@@ -61,8 +64,8 @@ class DatabaseConfigModel(BaseModel):
 
     @root_validator(pre=True)
     def assemble_db_url_if_not_provided(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        if values.get("url"):
-            return values 
+        if values.get("url"): # Si une URL complète est déjà fournie, on l'utilise
+            return values
 
         db_type = values.get("db_type", "postgresql")
 
@@ -86,21 +89,21 @@ class DatabaseConfigModel(BaseModel):
                 else:
                     path_obj = Path(sqlite_path)
                     if not path_obj.is_absolute():
-                        path_obj = PROJECT_ROOT / path_obj
+                        path_obj = PROJECT_ROOT / path_obj # Assurer que le chemin est absolu
                     values["url"] = f"sqlite:///{path_obj.resolve()}"
         return values
 
-    @validator('url', always=True)
+    @validator('url', always=True) # S'exécute après `assemble_db_url_if_not_provided`
     def check_db_url_final_state(cls, v: Optional[Union[PostgresDsn, str]], values: Dict[str, Any]) -> Optional[Union[PostgresDsn, str]]:
         db_type = values.get('db_type')
-        # Si l'URL est None mais qu'elle est requise (PostgreSQL ou SQLite avec chemin), lever une erreur.
-        if not v and (db_type == 'postgresql' or (db_type == 'sqlite' and values.get('sqlite_path'))):
+        # Une URL est requise si db_type est postgresql, ou si c'est sqlite avec un chemin de fichier (pas :memory:)
+        is_persistent_sqlite = db_type == 'sqlite' and values.get('sqlite_path') and values.get('sqlite_path') != ":memory:"
+        if not v and (db_type == 'postgresql' or is_persistent_sqlite):
              raise ValueError(f"{db_type.capitalize()} database URL is required but could not be constructed and was not provided.")
 
-        if v: 
+        if v: # Si une URL a été fournie ou construite
             if db_type == 'postgresql':
-                # La validation PostgresDsn est faite par Pydantic si le type est Union[PostgresDsn, str]
-                # On vérifie juste le préfixe si c'est une chaîne.
+                # La validation PostgresDsn est gérée par Pydantic. Si c'est une chaîne, on vérifie le préfixe.
                 if isinstance(v, str) and not v.startswith("postgresql+psycopg2://"):
                     raise ValueError("Invalid PostgreSQL URL format. Expected 'postgresql+psycopg2://...'")
             elif db_type == 'sqlite':
@@ -109,17 +112,17 @@ class DatabaseConfigModel(BaseModel):
         return v
 
 
-class RedisConfigModel(BaseModel): 
+class RedisConfigModel(BaseModel):
     host: str = "localhost"
     port: int = 6379
     password: Optional[SecretStr] = None
 
-class DataConfig(BaseModel): 
+class DataConfig(BaseModel):
     storage_type: Literal['parquet', 'postgres'] = "parquet"
     storage_path: Path = Field(default_factory=lambda: PROJECT_ROOT / "data" / "historical")
     parquet_partition_cols: List[str] = ['pair', 'year', 'month']
     cache_enabled: bool = True
-    cache_ttl: int = 3600
+    cache_ttl: int = 3600 # en secondes
     parquet_export_enabled: bool = False
     parquet_export_path: Optional[Path] = None
     
@@ -132,14 +135,17 @@ class DataConfig(BaseModel):
     @validator('parquet_export_path', pre=True, always=True)
     def check_export_path_if_enabled(cls, v: Optional[Union[str, Path]], values: Dict[str, Any]) -> Optional[Path]:
         if values.get('parquet_export_enabled') and v is None:
-            raise InvalidConfigurationValueError("parquet_export_path must be set if parquet_export_enabled is True")
+            raise InvalidConfigurationValueError(
+                message="parquet_export_path must be set if parquet_export_enabled is True",
+                parameter="parquet_export_path" # Ajout du paramètre pour plus de clarté
+            )
         if v:
             if isinstance(v, str): v = Path(v)
             if not v.is_absolute(): return (PROJECT_ROOT / v).resolve()
             return v.resolve() if v else None
         return None
 
-class TradingConfig(BaseModel): 
+class TradingConfig(BaseModel):
     mode: Literal['cross_margin'] = "cross_margin"
     base_currency: Literal['USDC', 'USDT', 'BUSD', 'BTC', 'ETH'] = "USDC"
     allowed_pairs: List[str]
@@ -147,95 +153,106 @@ class TradingConfig(BaseModel):
     @validator('allowed_pairs', each_item=True)
     def check_pair_format(cls, v: str) -> str:
         if not v.isupper() or not v.isalnum() or len(v) < 6:
-            raise InvalidConfigurationValueError(f"Trading pair '{v}' format is invalid. Expected format like 'BTCUSDC'.")
+            raise InvalidConfigurationValueError(
+                message=f"Trading pair '{v}' format is invalid. Expected format like 'BTCUSDC'.",
+                parameter="allowed_pairs" # Ajout du paramètre
+            )
         return v
 
-class RiskConfig(BaseModel): 
+class RiskConfig(BaseModel):
     max_position_pct: float = Field(0.1, gt=0, le=1)
     max_drawdown_pct: float = Field(0.15, gt=0, le=1)
     daily_loss_limit_pct: float = Field(0.05, gt=0, le=1)
 
-class MonitoringConfig(BaseModel): 
+class MonitoringConfig(BaseModel):
     prometheus_enabled: bool = False
     prometheus_port: int = Field(9090, gt=1023, lt=65536)
-    alert_webhook_url: Optional[HttpUrl] = None 
+    alert_webhook_url: Optional[HttpUrl] = None
     log_level_console: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = "INFO"
     log_level_file: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = "DEBUG"
     log_to_file_enabled: bool = True
-    log_rotation: str = "1 day"
-    log_retention: str = "7 days"
+    log_rotation: str = "1 day" # ex: "100 MB", "1 week", "00:00"
+    log_retention: str = "7 days" # ex: "1 month"
     log_compression: Optional[Literal["gz", "bz2", "zip", "xz", "lzma", "tar", "tar.gz", "tar.bz2", "tar.xz"]] = "zip"
 
+    @validator('alert_webhook_url', pre=True)
+    def handle_placeholder_webhook_url(cls, v: Any) -> Optional[Any]:
+        if isinstance(v, str) and v == PLACEHOLDER_WEBHOOK_URL:
+            return None
+        return v
 
 class Settings(BaseSettings):
-    # Variables d'environnement directes que pydantic-settings va charger.
-    # Ces noms DOIVENT correspondre à vos variables dans .env (ou utiliser des alias ici).
-    BINANCE_API_KEY: Optional[SecretStr] = None # Rendu optionnel ici, la validation se fera dans BinanceConfigModel
+    # Variables d'environnement directes pour pydantic-settings
+    BINANCE_API_KEY: Optional[SecretStr] = None
     BINANCE_API_SECRET: Optional[SecretStr] = None
-    BINANCE_TESTNET: Optional[bool] = False # Optionnel avec défaut
+    BINANCE_TESTNET: Optional[bool] = False
     BINANCE_API_KEY_2: Optional[SecretStr] = None
     BINANCE_API_SECRET_2: Optional[SecretStr] = None
 
-    DB_TYPE: Optional[Literal["postgresql", "sqlite"]] = "postgresql"
+    DB_TYPE: Optional[Literal["postgresql", "sqlite"]] = None # Laissé optionnel, DatabaseConfigModel aura une valeur par défaut
     POSTGRES_USER: Optional[str] = None
     POSTGRES_PASSWORD: Optional[SecretStr] = None
-    POSTGRES_HOST: Optional[str] = "localhost"
-    POSTGRES_PORT: Optional[Union[int, str]] = 5432
-    POSTGRES_DB: Optional[str] = "algobot_db"
+    POSTGRES_HOST: Optional[str] = None
+    POSTGRES_PORT: Optional[Union[int, str]] = None
+    POSTGRES_DB: Optional[str] = None
     SQLITE_PATH: Optional[str] = None
-    DATABASE_URL: Optional[Union[PostgresDsn, str]] = None 
+    DATABASE_URL: Optional[Union[PostgresDsn, str]] = None # URL complète peut être fournie
 
-    DB_POOL_SIZE: Optional[int] = 5
-    DB_MAX_OVERFLOW: Optional[int] = 10
-    DB_POOL_TIMEOUT_SECONDS: Optional[int] = 30
-    DB_POOL_RECYCLE_SECONDS: Optional[int] = 3600
-    DB_POOL_PRE_PING_ENABLED: Optional[bool] = True
-    DB_CONNECT_MAX_RETRIES: Optional[int] = 5
-    DB_CONNECT_RETRY_MIN_WAIT_SECONDS: Optional[int] = 1
-    DB_CONNECT_RETRY_MAX_WAIT_SECONDS: Optional[int] = 10
+    DB_POOL_SIZE: Optional[int] = None
+    DB_MAX_OVERFLOW: Optional[int] = None
+    DB_POOL_TIMEOUT_SECONDS: Optional[int] = None
+    DB_POOL_RECYCLE_SECONDS: Optional[int] = None
+    DB_POOL_PRE_PING_ENABLED: Optional[bool] = None
+    DB_CONNECT_MAX_RETRIES: Optional[int] = None
+    DB_CONNECT_RETRY_MIN_WAIT_SECONDS: Optional[int] = None
+    DB_CONNECT_RETRY_MAX_WAIT_SECONDS: Optional[int] = None
 
-    REDIS_HOST: Optional[str] = "localhost"
-    REDIS_PORT: Optional[int] = 6379
+    REDIS_HOST: Optional[str] = None
+    REDIS_PORT: Optional[int] = None
     REDIS_PASSWORD: Optional[SecretStr] = None
     
-    ALERT_WEBHOOK_URL: Optional[HttpUrl] = None # Directement HttpUrl, Pydantic essaiera de parser
+    ALERT_WEBHOOK_URL: Optional[HttpUrl] = None
 
-
-    # Sections qui seront principalement peuplées depuis le fichier YAML.
-    # Leurs valeurs par défaut sont utilisées si la section/clé est absente du YAML.
+    # Sections lues depuis YAML, avec des valeurs par défaut via Field(default_factory=...)
     app: AppConfig = Field(default_factory=AppConfig)
     data: DataConfig = Field(default_factory=DataConfig)
-    trading: TradingConfig # Doit être dans YAML
+    # 'trading' est requis par le YAML, donc pas de default_factory. Sa présence sera validée.
+    trading: Optional[TradingConfig] = None # Rendu Optional ici, validé dans perform_cross_model_validation
     risk: RiskConfig = Field(default_factory=RiskConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     
-    # Modèles imbriqués qui seront construits par le root_validator.
-    # Ils sont déclarés ici pour que Pydantic connaisse leur type.
-    binance: BinanceConfigModel
-    database: DatabaseConfigModel
-    redis: RedisConfigModel 
+    # Champs pour les modèles imbriqués. Pydantic essaiera de les construire
+    # à partir des dictionnaires préparés par prepare_nested_model_inputs.
+    binance: Optional[BinanceConfigModel] = None
+    database: Optional[DatabaseConfigModel] = None
+    redis: Optional[RedisConfigModel] = None
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE_PATH if ENV_FILE_PATH.exists() else None,
-        env_prefix='', # Les noms de champs ci-dessus sont les noms exacts des variables d'env
-        extra='ignore',
-        populate_by_name=True # Utile si on utilisait des alias sur les champs directs de Settings
+        env_prefix='', # Pas de préfixe pour les variables d'env
+        extra='ignore', # Ignorer les variables d'env supplémentaires
+        populate_by_name=True # Pour les alias (non utilisé ici mais bonne pratique)
     )
 
+    @validator('ALERT_WEBHOOK_URL', pre=True)
+    def handle_placeholder_top_level_webhook_url(cls, v: Any) -> Optional[Any]:
+        if isinstance(v, str) and v == PLACEHOLDER_WEBHOOK_URL:
+            return None
+        return v
+
     @root_validator(pre=True) # S'exécute AVANT la validation des champs individuels de Settings
-    def prepare_nested_model_input_data(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+    def prepare_nested_model_inputs(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Prépare les dictionnaires d'entrée pour les modèles imbriqués (binance, database, redis)
-        en utilisant les variables d'environnement (déjà chargées dans `values` par pydantic-settings
-        pour les champs directs de Settings) et les sections correspondantes du fichier YAML (également dans `values`).
+        Prépare les dictionnaires d'entrée pour les champs de type modèle (binance, database, redis)
+        en fusionnant les données du YAML et les variables d'environnement directes (déjà dans `values`).
+        Les clés résultantes ('binance', 'database', 'redis') dans `values` seront des dictionnaires
+        que Pydantic utilisera ensuite pour instancier BinanceConfigModel, DatabaseConfigModel, etc.
         """
         # Pour Binance:
-        # `values` contient déjà BINANCE_API_KEY, etc., depuis .env
-        # et potentiellement une section `binance` depuis YAML.
-        binance_yaml_data = values.pop('binance', {}) # Récupère et retire la section YAML 'binance' de `values`
+        binance_yaml_data = values.pop('binance', {}) # Récupère la section YAML 'binance' et la retire de `values` pour éviter conflit de type
         if not isinstance(binance_yaml_data, dict): binance_yaml_data = {}
         
-        values['binance_input_data'] = { # Créer une nouvelle clé pour les données d'entrée de BinanceConfigModel
+        values['binance'] = { # Prépare le dict pour le champ Settings.binance
             "api_key": values.get('BINANCE_API_KEY', binance_yaml_data.get('api_key')),
             "api_secret": values.get('BINANCE_API_SECRET', binance_yaml_data.get('api_secret')),
             "testnet": values.get('BINANCE_TESTNET', binance_yaml_data.get('testnet', False)),
@@ -246,7 +263,7 @@ class Settings(BaseSettings):
         # Pour Database:
         database_yaml_data = values.pop('database', {})
         if not isinstance(database_yaml_data, dict): database_yaml_data = {}
-        values['database_input_data'] = {
+        values['database'] = { # Prépare le dict pour le champ Settings.database
             "db_type": values.get('DB_TYPE', database_yaml_data.get('db_type', "postgresql")),
             "pg_user": values.get('POSTGRES_USER', database_yaml_data.get('pg_user')),
             "pg_password": values.get('POSTGRES_PASSWORD', database_yaml_data.get('pg_password')),
@@ -254,10 +271,9 @@ class Settings(BaseSettings):
             "pg_port": values.get('POSTGRES_PORT', database_yaml_data.get('pg_port', 5432)),
             "pg_db": values.get('POSTGRES_DB', database_yaml_data.get('pg_db', "algobot_db")),
             "sqlite_path": values.get('SQLITE_PATH', database_yaml_data.get('sqlite_path')),
-            "url": values.get('DATABASE_URL', database_yaml_data.get('url')),
+            "url": values.get('DATABASE_URL', database_yaml_data.get('url')), # Important: .env DATABASE_URL a priorité
             "pool_size": values.get('DB_POOL_SIZE', database_yaml_data.get('pool_size', 5)),
             "max_overflow": values.get('DB_MAX_OVERFLOW', database_yaml_data.get('max_overflow', 10)),
-            # ... inclure tous les champs de DatabaseConfigModel ...
             "pool_timeout_seconds": values.get('DB_POOL_TIMEOUT_SECONDS', database_yaml_data.get('pool_timeout_seconds', 30)),
             "pool_recycle_seconds": values.get('DB_POOL_RECYCLE_SECONDS', database_yaml_data.get('pool_recycle_seconds', 3600)),
             "pool_pre_ping_enabled": values.get('DB_POOL_PRE_PING_ENABLED', database_yaml_data.get('pool_pre_ping_enabled', True)),
@@ -269,70 +285,88 @@ class Settings(BaseSettings):
         # Pour Redis:
         redis_yaml_data = values.pop('redis', {})
         if not isinstance(redis_yaml_data, dict): redis_yaml_data = {}
-        values['redis_input_data'] = {
+        values['redis'] = { # Prépare le dict pour le champ Settings.redis
             "host": values.get('REDIS_HOST', redis_yaml_data.get('host', "localhost")),
             "port": values.get('REDIS_PORT', redis_yaml_data.get('port', 6379)),
             "password": values.get('REDIS_PASSWORD', redis_yaml_data.get('password')),
         }
 
-        # Pour Monitoring (ALERT_WEBHOOK_URL est déjà un champ direct de Settings)
-        monitoring_yaml_data = values.get('monitoring', {}) # Ne pas pop, car 'monitoring' est un champ de Settings
-        if isinstance(monitoring_yaml_data, dict) and values.get('ALERT_WEBHOOK_URL'):
-            monitoring_yaml_data['alert_webhook_url'] = values.get('ALERT_WEBHOOK_URL')
-        values['monitoring'] = monitoring_yaml_data # Mettre à jour la section monitoring dans values
+        # Pour Monitoring (ALERT_WEBHOOK_URL est un champ direct de Settings)
+        # Le champ 'monitoring' de Settings sera créé par Pydantic en utilisant MonitoringConfig.
+        # Nous devons nous assurer que la valeur pour 'alert_webhook_url' dans le dict 'monitoring'
+        # est correctement définie en prenant en compte le ALERT_WEBHOOK_URL de haut niveau.
+        monitoring_data_from_yaml = values.get('monitoring', {}) # Ne pas popper ici, 'monitoring' est un champ de Settings
+        if not isinstance(monitoring_data_from_yaml, dict): monitoring_data_from_yaml = {}
+        
+        # Priorité: .env (via Settings.ALERT_WEBHOOK_URL) > YAML (monitoring.alert_webhook_url)
+        top_level_webhook_url_value = values.get('ALERT_WEBHOOK_URL') # Déjà traité par son propre validateur (placeholder -> None)
+        
+        if top_level_webhook_url_value is not None:
+             monitoring_data_from_yaml['alert_webhook_url'] = top_level_webhook_url
+        # Si top_level_webhook_url_value est None, la valeur de YAML (si elle existe et n'est pas placeholder) sera utilisée.
+        # Le validateur de MonitoringConfig gérera le placeholder s'il vient du YAML.
+        
+        values['monitoring'] = monitoring_data_from_yaml # Assure que 'monitoring' est un dict pour Pydantic
+
+        # 'trading' est lu depuis YAML (pydantic-settings le place dans `values` s'il est dans yaml_data)
+        # Sa validation en TradingConfig se fera automatiquement par Pydantic.
+        # Idem pour app, data, risk.
 
         return values
 
     @root_validator(pre=False, skip_on_failure=True) # S'exécute APRES la validation des champs individuels
-    def construct_final_nested_models(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        # Utiliser les dictionnaires préparés pour instancier les modèles imbriqués
-        if 'binance_input_data' in values:
-            values['binance'] = BinanceConfigModel(**values.pop('binance_input_data'))
-        else: # Devrait être impossible si BINANCE_API_KEY est requis par Settings
-            raise MissingConfigurationError("Binance input data not prepared.")
+    def perform_cross_model_validation(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        # À ce stade, values['binance'], values['database'], values['redis'], values['trading']
+        # devraient être des instances de leurs modèles respectifs (ou None si Optional et non fourni).
+        
+        binance_cfg = values.get('binance')
+        if not isinstance(binance_cfg, BinanceConfigModel):
+            # Cela signifie que la création de BinanceConfigModel a échoué ou que les données étaient manquantes.
+            # Si api_key/secret sont requis dans BinanceConfigModel, Pydantic aurait déjà dû lever une erreur.
+            # On peut ajouter une vérification ici si Binance est absolument requis.
+            raise MissingConfigurationError(message="Binance configuration (API keys) is required and could not be loaded.", item="binance")
 
-        if 'database_input_data' in values:
-            values['database'] = DatabaseConfigModel(**values.pop('database_input_data'))
-        else:
-            raise MissingConfigurationError("Database input data not prepared.")
+        db_config = values.get('database')
+        if not isinstance(db_config, DatabaseConfigModel):
+             raise MissingConfigurationError(message="Database configuration is required and could not be loaded.", item="database")
+        if not db_config.url and (db_config.db_type == 'postgresql' or (db_config.db_type == 'sqlite' and db_config.sqlite_path != ":memory:")):
+             raise InvalidConfigurationValueError(message="Database URL is still missing after attempting to construct it.", parameter="database.url")
 
-        if 'redis_input_data' in values:
-            values['redis'] = RedisConfigModel(**values.pop('redis_input_data'))
-        else: # Si redis est optionnel dans YAML et pas d'env vars, on pourrait créer un RedisConfigModel par défaut
-            values['redis'] = RedisConfigModel() # Ou le rendre optionnel sur Settings
 
-        # 'monitoring' est déjà un MonitoringConfig grâce à Field(default_factory=MonitoringConfig)
-        # et mis à jour par prepare_nested_model_input_data.
-        # On pourrait revalider ici si nécessaire.
-        # values['monitoring'] = MonitoringConfig(**values.get('monitoring', {}))
+        # Valider la présence de la section 'trading'
+        trading_config = values.get('trading')
+        if not isinstance(trading_config, TradingConfig):
+            raise MissingConfigurationError(message="Trading configuration section ('trading:') is missing or invalid in YAML config file.", item="trading")
 
-        # Valider la cohérence finale
+        # Valider la cohérence entre data.storage_type et la configuration de la base de données
         data_config: Optional[DataConfig] = values.get('data')
-        db_config: Optional[DatabaseConfigModel] = values.get('database')
+        # db_config est déjà récupéré
 
         if data_config and db_config and data_config.storage_type == 'postgres':
-            if db_config.db_type != 'postgresql' or not db_config.url:
+            if db_config.db_type != 'postgresql': # L'URL est déjà validée pour être une DSN postgresql par DatabaseConfigModel si elle existe
                 raise InvalidConfigurationValueError(
-                    "If data.storage_type is 'postgres', database.db_type must be 'postgresql' "
-                    "and a valid PostgreSQL URL must be configured or constructible."
+                    message="If data.storage_type is 'postgres', database.db_type must be 'postgresql'.",
+                    parameter="data.storage_type/database.db_type"
                 )
-            if isinstance(db_config.url, str) and not db_config.url.startswith("postgresql"):
-                 raise InvalidConfigurationValueError("URL for postgres storage_type must be a PostgreSQL DSN.")
-        
-        if not values.get('trading'): 
-            raise MissingConfigurationError("Trading configuration section is missing in YAML.")
+            if not db_config.url or (isinstance(db_config.url, str) and not db_config.url.startswith("postgresql")):
+                 raise InvalidConfigurationValueError(
+                    message="A valid PostgreSQL URL is required when data.storage_type is 'postgres'.",
+                    parameter="database.url"
+                )
         return values
 
 
-def _substitute_env_vars_in_yaml_data(data: Any) -> Any:
+def _substitute_env_vars_in_yaml_data(data: Any, env_vars: Dict[str, str]) -> Any:
+    # Cette fonction n'est plus activement utilisée si pydantic-settings gère bien tout,
+    # mais conservée au cas où. La logique de fusion est maintenant dans le root_validator.
     if isinstance(data, dict):
-        return {k: _substitute_env_vars_in_yaml_data(v) for k, v in data.items()}
+        return {k: _substitute_env_vars_in_yaml_data(v, env_vars) for k, v in data.items()}
     elif isinstance(data, list):
-        return [_substitute_env_vars_in_yaml_data(item) for item in data]
+        return [_substitute_env_vars_in_yaml_data(item, env_vars) for item in data]
     elif isinstance(data, str):
         import re
-        data = re.sub(r'\$\{(\w+)\}', lambda m: os.getenv(m.group(1), f'${{{m.group(1)}}}'), data)
-        return data
+        # Ne pas substituer si la var d'env n'existe pas, laisser Pydantic gérer la validation du champ.
+        return re.sub(r'\$\{(\w+)\}', lambda m: env_vars.get(m.group(1), m.group(0)), data)
     return data
 
 def load_raw_config_from_yaml(config_path: Path) -> Dict[str, Any]:
@@ -344,40 +378,54 @@ def load_raw_config_from_yaml(config_path: Path) -> Dict[str, Any]:
         if raw_config is None: 
              return {} 
         if not isinstance(raw_config, dict):
-            raise InvalidConfigurationValueError(f"Configuration file {config_path} is not a valid YAML dictionary.")
+            raise InvalidConfigurationValueError(
+                message=f"Configuration file {config_path} content is not a valid YAML dictionary.",
+                parameter="config_file_format"
+            )
         return raw_config
     except yaml.YAMLError as e:
-        raise ConfigurationError(f"Error parsing YAML configuration file {config_path}: {e}")
-    except Exception as e:
-        raise ConfigurationError(f"Could not load configuration from {config_path}: {e}")
+        raise ConfigurationError(f"Error parsing YAML configuration file {config_path}: {e}", original_exception=e)
+    except Exception as e: # Autres erreurs de lecture de fichier
+        raise ConfigurationError(f"Could not load configuration from {config_path}: {e}", original_exception=e)
 
 def load_settings() -> Settings:
     try:
         yaml_data = load_raw_config_from_yaml(CONFIG_FILE_PATH)
-        substituted_yaml_data = _substitute_env_vars_in_yaml_data(yaml_data)
         
-        # Pydantic-Settings chargera d'abord les variables d'env directes dans Settings,
-        # puis fusionnera avec substituted_yaml_data.
-        # Ensuite, les root_validators s'exécuteront.
-        settings_instance = Settings(**substituted_yaml_data)
+        # Pydantic-Settings s'occupe de charger .env et de fusionner.
+        # Les validateurs s'exécuteront sur les données combinées.
+        settings_instance = Settings(**yaml_data)
         return settings_instance
 
-    except ValidationError as e:
+    except ValidationError as e: # Erreur de validation Pydantic (y compris celles de nos validateurs)
         error_details = []
-        for error in e.errors():
+        # Utiliser include_input=False pour ne pas afficher les valeurs sensibles dans les logs
+        for error in e.errors(include_url=False, include_input=False): 
             loc_str = " -> ".join(map(str, error['loc']))
             msg = error['msg']
-            inp = error.get('input', 'N/A')
-            error_details.append(f"  - Location: '{loc_str}', Message: '{msg}', Input: {inp}")
+            # inp_val = error.get('input') # Éviter d'afficher l'input pour les secrets
+            # Pour le débogage local, on peut réactiver l'affichage de l'input
+            inp_val_debug = error.get('input')
+            if isinstance(inp_val_debug, dict) and len(inp_val_debug) > 5:
+                inp_repr_debug = f"{{...dict with {len(inp_val_debug)} keys...}}"
+            elif isinstance(inp_val_debug, SecretStr):
+                inp_repr_debug = "[SECRET]"
+            else:
+                inp_repr_debug = repr(inp_val_debug)
+            
+            # error_details.append(f"  - Location: '{loc_str}', Message: '{msg}'") # Version sans input
+            error_details.append(f"  - Location: '{loc_str}', Message: '{msg}', Input: {inp_repr_debug}")
+
+
         error_messages = "\n".join(error_details)
-        raise ConfigurationError(f"Configuration validation failed:\n{error_messages}")
+        raise ConfigurationError(f"Configuration validation failed:\n{error_messages}", original_exception=e)
     except ConfigurationError: 
-        raise
+        raise 
     except Exception as e: 
-        raise ConfigurationError(f"An unexpected error occurred while loading settings: {type(e).__name__} - {e}")
+        raise ConfigurationError(f"An unexpected error occurred while loading settings: {type(e).__name__} - {e}", original_exception=e)
 
 try:
     settings: Settings = load_settings()
 except ConfigurationError as e:
-    print(f"CRITICAL CONFIGURATION ERROR: {e}")
-    raise 
+    print(f"CRITICAL CONFIGURATION ERROR: {e}") 
+    raise
