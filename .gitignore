@@ -49,7 +49,7 @@ logs/
 results/
 optuna.db # Base de données Optuna
 optuna_journal.log # Journal de Optuna Storage
-
+*.parquet
 # Données du projet (selon Architecture_Projet.pdf)
 data/historical/
 data/cache/
