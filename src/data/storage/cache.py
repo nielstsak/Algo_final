@@ -2,15 +2,14 @@
 import pickle
 import hashlib
 import asyncio
-from typing import Any, Optional, Union, List
+from typing import Any, Optional, Union, List, Dict # Added Dict for get_info return type
 from datetime import datetime, timedelta
 import pandas as pd
 import redis.asyncio as redis
 from loguru import logger
 
 from src.core.config import settings
-from src.core.exceptions import CacheError
-
+# from src.core.exceptions import CacheError # CacheError n'est pas utilisé dans ce snippet
 
 class CacheManager:
     """
@@ -59,8 +58,11 @@ class CacheManager:
             self._initialized = False
             
         except Exception as e:
-            logger.error(f"Error getting cache info: {e}")
-            return {"available": False, "error": str(e)} as e:
+            # Correction pour l'erreur à la ligne 63 originale:
+            # La ligne `logger.error(f"Error getting cache info: {e}")` a été supprimée car elle semblait déplacée.
+            # La ligne `return {"available": False, "error": str(e)} as e:` contenait une erreur de syntaxe (`as e:`)
+            # et le `return` n'est pas approprié pour la méthode `initialize` qui retourne `None`.
+            # Le message d'erreur ci-dessous est plus générique pour une initialisation échouée.
             logger.error(f"Unexpected error initializing cache: {e}")
             self.redis_client = None
             self._initialized = False
@@ -142,7 +144,7 @@ class CacheManager:
                 for col in df_data.get('datetime_columns', []):
                     if col in df.columns:
                         df[col] = pd.to_datetime(df[col])
-                    elif col == df.index.name:
+                    elif col == df.index.name: # Check if the index itself is a datetime column
                         df.index = pd.to_datetime(df.index)
                         
                 return df
@@ -186,7 +188,7 @@ class CacheManager:
             if isinstance(value, pd.DataFrame):
                 # Convertir le DataFrame en format sérialisable
                 df_data = {
-                    'data': value.reset_index().to_dict('records'),
+                    'data': value.reset_index().to_dict('records'), # reset_index to handle index serialization
                     'index_name': value.index.name,
                     'datetime_columns': []
                 }
@@ -197,7 +199,8 @@ class CacheManager:
                         df_data['datetime_columns'].append(col)
                         
                 if pd.api.types.is_datetime64_any_dtype(value.index):
-                    df_data['datetime_columns'].append(value.index.name or 'index')
+                    # Ensure index name is a string, use 'index' if None
+                    df_data['datetime_columns'].append(value.index.name if value.index.name is not None else 'index') 
                     
                 value_to_store = {'_dataframe_': df_data}
             else:
@@ -257,7 +260,7 @@ class CacheManager:
         try:
             return await self.redis_client.exists(key) > 0
             
-        except Exception:
+        except Exception: # Consider logging this exception too
             return False
             
     async def clear(self) -> bool:
@@ -295,8 +298,8 @@ class CacheManager:
         try:
             # Rechercher les clés correspondantes
             keys = []
-            async for key in self.redis_client.scan_iter(match=pattern):
-                keys.append(key)
+            async for key_bytes in self.redis_client.scan_iter(match=pattern): # redis-py returns bytes for keys
+                keys.append(key_bytes) 
                 
             # Supprimer par batch
             if keys:
@@ -323,19 +326,26 @@ class CacheManager:
         try:
             info = await self.redis_client.info()
             
+            keyspace_hits = info.get("keyspace_hits", 0)
+            keyspace_misses = info.get("keyspace_misses", 0)
+            total_lookups = keyspace_hits + keyspace_misses
+            if total_lookups == 0: # Avoid division by zero if no lookups yet
+                 total_lookups = 1 # Set to 1 to avoid division by zero, hit rate will be 0
+
             return {
                 "available": True,
                 "used_memory": info.get("used_memory_human", "N/A"),
                 "used_memory_peak": info.get("used_memory_peak_human", "N/A"),
                 "connected_clients": info.get("connected_clients", 0),
                 "total_commands_processed": info.get("total_commands_processed", 0),
-                "keyspace_hits": info.get("keyspace_hits", 0),
-                "keyspace_misses": info.get("keyspace_misses", 0),
-                "hit_rate": (
-                    info.get("keyspace_hits", 0) / 
-                    (info.get("keyspace_hits", 0) + info.get("keyspace_misses", 1))
-                    * 100 if info.get("keyspace_hits", 0) > 0 else 0
-                )
+                "keyspace_hits": keyspace_hits,
+                "keyspace_misses": keyspace_misses,
+                "hit_rate": (keyspace_hits / total_lookups) * 100 if keyspace_hits > 0 else 0.0
+
             }
             
-        except Exception
+        # Correction pour l'erreur à la ligne 341 originale:
+        # `except Exception` a été complété par `: as e:` et un corps pour la gestion d'erreur.
+        except Exception as e:
+            logger.error(f"Error getting cache info: {e}")
+            return {"available": False, "error": str(e)}
