@@ -1,279 +1,341 @@
 # src/data/storage/cache.py
+import pickle
+import hashlib
 import asyncio
-import pickle # Using pickle for simplicity, consider msgpack for performance/security with DataFrames
-from typing import Any, Optional, Union
-from datetime import timedelta
-import redis.asyncio as aioredis # type: ignore
+from typing import Any, Optional, Union, List
+from datetime import datetime, timedelta
+import pandas as pd
+import redis.asyncio as redis
 from loguru import logger
 
 from src.core.config import settings
-from src.core.exceptions import CacheError, ConfigurationError
+from src.core.exceptions import CacheError
+
 
 class CacheManager:
     """
-    Manages caching operations, primarily using Redis.
-    Handles serialization/deserialization of cached objects.
+    Gestionnaire de cache utilisant Redis pour stocker temporairement les données.
+    Améliore les performances en évitant les requêtes répétitives.
     """
-
+    
     def __init__(self):
-        """Initializes the CacheManager."""
-        self.redis_url: Optional[str] = None
-        self.redis_client: Optional[aioredis.Redis] = None
-        self._initialized: bool = False
-
-        if settings.data.cache_enabled:
-            if not settings.redis or not settings.redis.host:
-                raise ConfigurationError("Redis is enabled but connection details (host) are not configured.")
-
-            # Construct Redis URL if not fully provided in settings
-            # Example: redis://[[username]:[password]]@[hostname]:[port]/[db_number]
-            # For simplicity, assuming host and port are main concerns from settings.
-            # Password handling should be secure.
-            password_part = ""
-            if settings.redis.password:
-                password_value = settings.redis.password.get_secret_value()
-                if password_value: # Ensure password is not None or empty
-                    password_part = f":{password_value}@"
-
-            self.redis_url = f"redis://{password_part}{settings.redis.host}:{settings.redis.port}/0"
-            logger.info(f"CacheManager initialized for Redis at {settings.redis.host}:{settings.redis.port}")
-        else:
-            logger.info("CacheManager initialized with caching disabled.")
-
-
-    async def initialize(self):
-        """Initializes the Redis client connection if caching is enabled."""
-        if not settings.data.cache_enabled:
-            logger.debug("Caching is disabled, skipping Redis client initialization.")
-            self._initialized = True # Mark as initialized even if disabled
-            return
-
-        if self._initialized and self.redis_client:
-            logger.debug("Redis client already initialized.")
-            return
-
-        if not self.redis_url:
-             raise ConfigurationError("Redis URL not set, cannot initialize client.")
-
+        """Initialise le gestionnaire de cache."""
+        self.redis_client: Optional[redis.Redis] = None
+        self.default_ttl = settings.data.cache_ttl
+        self._initialized = False
+        
+        # Configuration Redis
+        self.redis_config = {
+            'host': settings.redis.host if hasattr(settings, 'redis') else 'localhost',
+            'port': settings.redis.port if hasattr(settings, 'redis') else 6379,
+            'decode_responses': False,  # Pour gérer les données binaires
+            'socket_connect_timeout': 5,
+            'socket_timeout': 5,
+            'retry_on_timeout': True,
+            'health_check_interval': 30
+        }
+        
+        # Ajouter le mot de passe si configuré
+        if hasattr(settings, 'redis') and settings.redis.password:
+            self.redis_config['password'] = settings.redis.password.get_secret_value()
+            
+        logger.info("CacheManager initialized")
+        
+    async def initialize(self) -> None:
+        """Initialise la connexion Redis."""
         try:
-            # pool = aioredis.ConnectionPool.from_url(self.redis_url, max_connections=10)
-            # self.redis_client = aioredis.Redis(connection_pool=pool)
-            # Using from_url directly creates a client with a connection pool
-            self.redis_client = aioredis.Redis.from_url(self.redis_url)
-            await self.redis_client.ping() # Verify connection
+            # Créer le client Redis asynchrone
+            self.redis_client = redis.Redis(**self.redis_config)
+            
+            # Tester la connexion
+            await self.redis_client.ping()
+            
             self._initialized = True
-            logger.success("Redis client initialized and connection verified.")
+            logger.success("CacheManager connected to Redis")
+            
+        except (redis.ConnectionError, redis.TimeoutError) as e:
+            logger.warning(f"Redis connection failed: {e}. Cache will be disabled.")
+            self.redis_client = None
+            self._initialized = False
+            
         except Exception as e:
-            self.redis_client = None # Ensure client is None if init fails
-            logger.error(f"Failed to initialize Redis client: {e}")
-            # Optionally, allow the app to run without cache, or raise CacheError
-            # For now, we'll log and proceed, cache operations will then fail gracefully.
-            # raise CacheError(f"Redis client initialization failed: {e}", original_exception=e)
-
-
-    async def close(self):
-        """Closes the Redis client connection."""
+            logger.error(f"Error getting cache info: {e}")
+            return {"available": False, "error": str(e)} as e:
+            logger.error(f"Unexpected error initializing cache: {e}")
+            self.redis_client = None
+            self._initialized = False
+            
+    async def close(self) -> None:
+        """Ferme la connexion Redis."""
         if self.redis_client:
-            try:
-                await self.redis_client.close()
-                # await self.redis_client.connection_pool.disconnect() # If using explicit pool
-                logger.info("Redis client connection closed.")
-            except Exception as e:
-                logger.error(f"Error closing Redis client connection: {e}")
-            finally:
-                self.redis_client = None
-                self._initialized = False
-        else:
-            logger.debug("Redis client already closed or not initialized.")
-
-
-    def generate_key(self, *args: Any) -> str:
+            await self.redis_client.close()
+            logger.info("CacheManager connection closed")
+            
+    def is_available(self) -> bool:
+        """Vérifie si le cache est disponible."""
+        return self._initialized and self.redis_client is not None
+        
+    def generate_key(self, *args) -> str:
         """
-        Generates a consistent cache key from the given arguments.
-        Simple string concatenation for this example.
+        Génère une clé de cache unique basée sur les arguments.
+        
+        Args:
+            *args: Arguments utilisés pour générer la clé
+            
+        Returns:
+            Clé de cache unique
         """
-        return ":".join(map(str, args))
-
+        # Créer une représentation string des arguments
+        key_parts = []
+        for arg in args:
+            if isinstance(arg, (datetime, pd.Timestamp)):
+                key_parts.append(arg.isoformat())
+            elif isinstance(arg, pd.DataFrame):
+                # Pour les DataFrames, utiliser une représentation simplifiée
+                key_parts.append(f"df_{len(arg)}_{arg.index.min()}_{arg.index.max()}")
+            else:
+                key_parts.append(str(arg))
+                
+        key_string = ":".join(key_parts)
+        
+        # Limiter la longueur de la clé
+        if len(key_string) > 200:
+            # Utiliser un hash pour les clés très longues
+            hash_value = hashlib.md5(key_string.encode()).hexdigest()
+            key_string = f"{key_parts[0]}:{hash_value}"
+            
+        return key_string
+        
     async def get(self, key: str) -> Optional[Any]:
-        """Retrieves an item from the cache."""
-        if not self.redis_client or not self._initialized:
-            logger.warning("Cache not available (not initialized or disabled). Cannot get item.")
-            return None
-        try:
-            cached_value = await self.redis_client.get(key)
-            if cached_value:
-                logger.debug(f"Cache hit for key: {key}")
-                # Deserialize the value (e.g., using pickle)
-                return pickle.loads(cached_value)
-            logger.debug(f"Cache miss for key: {key}")
-            return None
-        except Exception as e:
-            logger.error(f"Error getting item from cache (key: {key}): {e}")
-            # Optionally, raise CacheError or return None
-            # raise CacheError(f"Failed to get item for key '{key}': {e}", original_exception=e)
-            return None # Fail gracefully
-
-    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None):
         """
-        Stores an item in the cache with an optional Time-To-Live (TTL).
+        Récupère une valeur du cache.
+        
+        Args:
+            key: Clé de cache
+            
+        Returns:
+            Valeur stockée ou None si non trouvée/expirée
         """
-        if not self.redis_client or not self._initialized:
-            logger.warning("Cache not available (not initialized or disabled). Cannot set item.")
-            return
-
-        if ttl_seconds is None:
-            ttl_seconds = settings.data.cache_ttl # Default TTL from settings
-
+        if not self.is_available():
+            return None
+            
         try:
-            # Serialize the value (e.g., using pickle)
-            serialized_value = pickle.dumps(value)
-            await self.redis_client.set(key, serialized_value, ex=ttl_seconds)
-            logger.debug(f"Item stored in cache (key: {key}, ttl: {ttl_seconds}s)")
+            # Récupérer la valeur
+            value_bytes = await self.redis_client.get(key)
+            
+            if value_bytes is None:
+                return None
+                
+            # Désérialiser
+            value = pickle.loads(value_bytes)
+            
+            # Si c'est un DataFrame, recréer avec les types corrects
+            if isinstance(value, dict) and '_dataframe_' in value:
+                df_data = value['_dataframe_']
+                df = pd.DataFrame(df_data['data'])
+                
+                # Restaurer l'index
+                if df_data.get('index_name'):
+                    df.set_index(df_data['index_name'], inplace=True)
+                    
+                # Restaurer les types datetime
+                for col in df_data.get('datetime_columns', []):
+                    if col in df.columns:
+                        df[col] = pd.to_datetime(df[col])
+                    elif col == df.index.name:
+                        df.index = pd.to_datetime(df.index)
+                        
+                return df
+                
+            return value
+            
+        except (redis.ConnectionError, redis.TimeoutError) as e:
+            logger.warning(f"Cache get failed for key {key}: {e}")
+            return None
+            
         except Exception as e:
-            logger.error(f"Error setting item in cache (key: {key}): {e}")
-            # Optionally, raise CacheError
-            # raise CacheError(f"Failed to set item for key '{key}': {e}", original_exception=e)
-
-
-    async def delete(self, key: str) -> bool:
-        """Deletes an item from the cache. Returns True if deleted, False otherwise."""
-        if not self.redis_client or not self._initialized:
-            logger.warning("Cache not available (not initialized or disabled). Cannot delete item.")
+            logger.error(f"Unexpected error getting cache key {key}: {e}")
+            return None
+            
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        ttl: Optional[int] = None
+    ) -> bool:
+        """
+        Stocke une valeur dans le cache.
+        
+        Args:
+            key: Clé de cache
+            value: Valeur à stocker
+            ttl: Time To Live en secondes (None = utiliser le TTL par défaut)
+            
+        Returns:
+            True si stocké avec succès, False sinon
+        """
+        if not self.is_available():
             return False
+            
+        try:
+            # Utiliser le TTL par défaut si non spécifié
+            if ttl is None:
+                ttl = self.default_ttl
+                
+            # Préparer la valeur pour la sérialisation
+            if isinstance(value, pd.DataFrame):
+                # Convertir le DataFrame en format sérialisable
+                df_data = {
+                    'data': value.reset_index().to_dict('records'),
+                    'index_name': value.index.name,
+                    'datetime_columns': []
+                }
+                
+                # Identifier les colonnes datetime
+                for col in value.columns:
+                    if pd.api.types.is_datetime64_any_dtype(value[col]):
+                        df_data['datetime_columns'].append(col)
+                        
+                if pd.api.types.is_datetime64_any_dtype(value.index):
+                    df_data['datetime_columns'].append(value.index.name or 'index')
+                    
+                value_to_store = {'_dataframe_': df_data}
+            else:
+                value_to_store = value
+                
+            # Sérialiser
+            value_bytes = pickle.dumps(value_to_store)
+            
+            # Stocker avec TTL
+            await self.redis_client.setex(key, ttl, value_bytes)
+            
+            logger.debug(f"Cached key {key} with TTL {ttl}s")
+            return True
+            
+        except (redis.ConnectionError, redis.TimeoutError) as e:
+            logger.warning(f"Cache set failed for key {key}: {e}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Unexpected error setting cache key {key}: {e}")
+            return False
+            
+    async def delete(self, key: str) -> bool:
+        """
+        Supprime une clé du cache.
+        
+        Args:
+            key: Clé à supprimer
+            
+        Returns:
+            True si supprimé, False sinon
+        """
+        if not self.is_available():
+            return False
+            
         try:
             result = await self.redis_client.delete(key)
-            if result > 0:
-                logger.debug(f"Item deleted from cache (key: {key})")
-                return True
-            logger.debug(f"Item not found in cache for deletion (key: {key})")
-            return False
+            return result > 0
+            
         except Exception as e:
-            logger.error(f"Error deleting item from cache (key: {key}): {e}")
-            # raise CacheError(f"Failed to delete item for key '{key}': {e}", original_exception=e)
+            logger.error(f"Error deleting cache key {key}: {e}")
             return False
-
+            
     async def exists(self, key: str) -> bool:
-        """Checks if a key exists in the cache."""
-        if not self.redis_client or not self._initialized:
-            logger.warning("Cache not available (not initialized or disabled). Cannot check if item exists.")
+        """
+        Vérifie si une clé existe dans le cache.
+        
+        Args:
+            key: Clé à vérifier
+            
+        Returns:
+            True si la clé existe, False sinon
+        """
+        if not self.is_available():
             return False
+            
         try:
-            return await self.redis_client.exists(key) > 0 # type: ignore
-        except Exception as e:
-            logger.error(f"Error checking if key exists in cache (key: {key}): {e}")
-            # raise CacheError(f"Failed to check existence for key '{key}': {e}", original_exception=e)
+            return await self.redis_client.exists(key) > 0
+            
+        except Exception:
             return False
-
+            
     async def clear(self) -> bool:
-        """Clears the entire cache (flushes the current DB). Use with caution."""
-        if not self.redis_client or not self._initialized:
-            logger.warning("Cache not available (not initialized or disabled). Cannot clear cache.")
+        """
+        Vide complètement le cache.
+        
+        Returns:
+            True si vidé avec succès, False sinon
+        """
+        if not self.is_available():
             return False
+            
         try:
             await self.redis_client.flushdb()
-            logger.info("Cache cleared (current Redis DB flushed).")
+            logger.info("Cache cleared")
             return True
+            
         except Exception as e:
             logger.error(f"Error clearing cache: {e}")
-            # raise CacheError(f"Failed to clear cache: {e}", original_exception=e)
             return False
-
+            
     async def invalidate_pattern(self, pattern: str) -> int:
         """
-        Invalidates (deletes) all keys matching a given pattern.
-        Warning: SCAN can be slow on large Redis instances if not used carefully.
-        Ensure patterns are specific enough.
-
+        Invalide toutes les clés correspondant à un pattern.
+        
         Args:
-            pattern: The pattern to match keys against (e.g., "klines:BTCUSDC:*")
-
+            pattern: Pattern de clé (ex: "klines:BTCUSDC:*")
+            
         Returns:
-            The number of keys deleted.
+            Nombre de clés supprimées
         """
-        if not self.redis_client or not self._initialized:
-            logger.warning("Cache not available (not initialized or disabled). Cannot invalidate pattern.")
+        if not self.is_available():
             return 0
-
-        deleted_count = 0
+            
         try:
-            async for key in self.redis_client.scan_iter(match=pattern, count=100): # count for batching
-                await self.redis_client.delete(key)
-                deleted_count += 1
-            if deleted_count > 0:
-                logger.info(f"Invalidated {deleted_count} keys matching pattern: {pattern}")
-            else:
-                logger.debug(f"No keys found matching pattern for invalidation: {pattern}")
-            return deleted_count
-        except Exception as e:
-            logger.error(f"Error invalidating cache pattern '{pattern}': {e}")
-            # raise CacheError(f"Failed to invalidate pattern '{pattern}': {e}", original_exception=e)
+            # Rechercher les clés correspondantes
+            keys = []
+            async for key in self.redis_client.scan_iter(match=pattern):
+                keys.append(key)
+                
+            # Supprimer par batch
+            if keys:
+                deleted = await self.redis_client.delete(*keys)
+                logger.debug(f"Invalidated {deleted} keys matching pattern {pattern}")
+                return deleted
+                
             return 0
-
-# Example usage (typically not directly in this file but in DataManager or services)
-async def example_cache_usage():
-    # This requires Redis to be running and configured in .env or settings.
-    # For this example, we assume settings are loaded.
-    if not settings.data.cache_enabled:
-        print("Caching is disabled in settings. Skipping example.")
-        return
-
-    cache_manager = CacheManager()
-    await cache_manager.initialize()
-
-    if not cache_manager.redis_client:
-        print("Failed to initialize cache manager. Skipping example.")
-        return
-
-    my_key = cache_manager.generate_key("test_data", "user123")
-    my_data = {"name": "Test User", "value": 42, "items": [1, 2, 3]}
-
-    # Set data
-    await cache_manager.set(my_key, my_data, ttl_seconds=60)
-    print(f"Set data for key: {my_key}")
-
-    # Get data
-    retrieved_data = await cache_manager.get(my_key)
-    if retrieved_data:
-        print(f"Retrieved data: {retrieved_data}")
-        assert retrieved_data == my_data
-    else:
-        print("Data not found in cache (or expired).")
-
-    # Check existence
-    exists = await cache_manager.exists(my_key)
-    print(f"Key '{my_key}' exists: {exists}")
-    assert exists
-
-    # Invalidate pattern (example)
-    await cache_manager.set("klines:BTCUSDC:1m", "some_kline_data_btc", 60)
-    await cache_manager.set("klines:ETHUSDC:1m", "some_kline_data_eth", 60)
-    deleted_num = await cache_manager.invalidate_pattern("klines:BTCUSDC:*")
-    print(f"Deleted {deleted_num} keys matching 'klines:BTCUSDC:*'")
-    assert await cache_manager.exists("klines:BTCUSDC:1m") is False
-    assert await cache_manager.exists("klines:ETHUSDC:1m") is True
-
-
-    # Delete data
-    deleted = await cache_manager.delete(my_key)
-    print(f"Key '{my_key}' deleted: {deleted}")
-    assert deleted
-    assert await cache_manager.get(my_key) is None
-
-
-    await cache_manager.close()
-
-if __name__ == "__main__":
-    # To run this example:
-    # 1. Ensure you have a Redis server running.
-    # 2. Configure Redis in your settings (e.g., through .env file for src.core.config.settings)
-    #    settings.data.cache_enabled = True
-    #    settings.redis.host = "localhost"
-    #    settings.redis.port = 6379
-    try:
-        asyncio.run(example_cache_usage())
-    except ConfigurationError as e:
-        print(f"Configuration Error: {e}. Please ensure Redis is configured and cache is enabled in settings.")
-    except CacheError as e:
-        print(f"Cache Error: {e}. Is Redis server running and accessible?")
-    except ConnectionRefusedError:
-        print("Connection refused. Is Redis server running on the configured host/port?")
+            
+        except Exception as e:
+            logger.error(f"Error invalidating pattern {pattern}: {e}")
+            return 0
+            
+    async def get_info(self) -> Dict[str, Any]:
+        """
+        Récupère des informations sur l'état du cache.
+        
+        Returns:
+            Dictionnaire avec les informations du cache
+        """
+        if not self.is_available():
+            return {"available": False}
+            
+        try:
+            info = await self.redis_client.info()
+            
+            return {
+                "available": True,
+                "used_memory": info.get("used_memory_human", "N/A"),
+                "used_memory_peak": info.get("used_memory_peak_human", "N/A"),
+                "connected_clients": info.get("connected_clients", 0),
+                "total_commands_processed": info.get("total_commands_processed", 0),
+                "keyspace_hits": info.get("keyspace_hits", 0),
+                "keyspace_misses": info.get("keyspace_misses", 0),
+                "hit_rate": (
+                    info.get("keyspace_hits", 0) / 
+                    (info.get("keyspace_hits", 0) + info.get("keyspace_misses", 1))
+                    * 100 if info.get("keyspace_hits", 0) > 0 else 0
+                )
+            }
+            
+        except Exception

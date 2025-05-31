@@ -51,13 +51,13 @@ trading:
   mode: "cross_margin"
   base_currency: "USDC"
   allowed_pairs:
-    - "BTCUSDC"
-    - "ETHUSDC"
+    - "HBARUSDC"
+    - "WIFUSDC"
     # - "BNBUSDC" # Exemple
 
 # Configuration des risques (valeurs par défaut de config.py seront utilisées si non spécifiées)
 risk:
-  max_position_pct: 0.05 # 5%
+  max_position_pct: 0.80 # 5%
   # max_drawdown_pct: 0.20
   # daily_loss_limit_pct: 0.10
 

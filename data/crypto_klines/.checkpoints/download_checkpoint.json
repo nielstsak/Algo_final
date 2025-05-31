@@ -1,0 +1,14 @@
+{
+  "pairs": [
+    "HBARUSDC",
+    "WIFUSDC"
+  ],
+  "completed_pairs": [
+    "HBARUSDC",
+    "WIFUSDC"
+  ],
+  "start_ts": 1727733600000,
+  "end_ts": 1748642399999,
+  "interval": "1m",
+  "last_update": "2025-05-31 14:37:25.910377"
+}

@@ -39,12 +39,29 @@ class ParquetStorage(BaseStorage):
     async def initialize(self) -> None:
         """Initialise le système de stockage."""
         try:
-            # Créer le répertoire de stockage s'il n'existe pas
+            # Fonction synchrone pour la gestion de chemin
+            def _ensure_directory_exists(path: Path):
+                if path.is_file(): # Si le chemin existe et est un fichier
+                    logger.warning(f"Storage path {path} exists as a file. Attempting to remove and create directory.")
+                    try:
+                        path.unlink() # Supprimer le fichier
+                        path.mkdir(parents=True, exist_ok=False) # Tenter de créer le répertoire
+                        logger.info(f"Successfully removed file and created directory at {path}.")
+                    except Exception as e_replace:
+                        # Envelopper l'exception originale pour un meilleur diagnostic
+                        raise StorageError(f"Storage path {path} is a file and could not be replaced by a directory: {e_replace}", original_exception=e_replace)
+                elif not path.is_dir(): # Si le chemin n'est pas un répertoire (donc n'existe pas ou est un autre type de fichier)
+                    logger.info(f"Storage directory {path} does not exist or is not a directory. Creating it.")
+                    path.mkdir(parents=True, exist_ok=True) # exist_ok=True est sûr ici
+                    logger.info(f"Successfully created storage directory {path}.")
+                else:
+                    # Le chemin existe déjà et est un répertoire
+                    logger.debug(f"Storage directory {path} already exists.")
+
             await asyncio.get_event_loop().run_in_executor(
                 self.executor,
-                self.storage_path.mkdir,
-                True,  # parents
-                True   # exist_ok
+                _ensure_directory_exists,
+                self.storage_path
             )
             
             self._initialized = True
@@ -52,10 +69,14 @@ class ParquetStorage(BaseStorage):
             
         except Exception as e:
             logger.error(f"Failed to initialize ParquetStorage: {e}")
-            raise StorageError(
-                f"Failed to initialize ParquetStorage: {e}",
-                original_exception=e
-            )
+            # S'assurer que l'exception est bien une StorageError si elle vient de nos vérifications
+            if not isinstance(e, StorageError):
+                raise StorageError(
+                    f"Failed to initialize ParquetStorage: {e}",
+                    original_exception=e
+                )
+            else:
+                raise # Relancer la StorageError déjà formatée
             
     async def close(self) -> None:
         """Ferme proprement les connexions."""
