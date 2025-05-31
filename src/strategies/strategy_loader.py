@@ -3,7 +3,7 @@ import importlib
 import inspect
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Type, Any
+from typing import Dict, List, Optional, Type, Any, Tuple
 from loguru import logger
 
 from src.strategies.base_strategy import BaseStrategy

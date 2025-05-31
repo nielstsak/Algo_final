@@ -3,6 +3,8 @@ import pytest
 import pandas as pd
 import numpy as np
 import time
+from typing import Dict, List, Optional, Set, Tuple, Any
+
 
 # S'assurer que le src path est accessible pour les imports
 # Cela peut être géré par la configuration de PYTHONPATH ou conftest.py
