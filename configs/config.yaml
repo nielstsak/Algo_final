@@ -1,81 +1,137 @@
-# configs/config.yaml (Exemple minimal valide)
+# configs/config.yaml
+# Version complète et commentée basée sur src/core/config.py
 
+# -----------------------------------------------------------------------------
+# Configuration Générale de l'Application
+# -----------------------------------------------------------------------------
 app:
-  name: "Algo Trading Bot"
-  version: "1.0.1" # Version mise à jour pour l'exemple
-  environment: "development" # ou "production", "test"
+  name: "Algo Trading Bot" # Nom de l'application
+  version: "1.0.1"        # Version actuelle de l'application
+  environment: "development" # Environnement d'exécution: "development", "production", ou "test"
 
-# Les clés API Binance doivent être dans votre fichier .env
-# et seront chargées par pydantic-settings ou via substitution si vous utilisez ${VAR_NAME} ici.
-# Pour pydantic-settings, il suffit que BINANCE__API_KEY et BINANCE__API_SECRET soient dans .env
-# Si vous n'utilisez pas la substitution ${...} ici, ces champs peuvent être omis du YAML
-# car pydantic-settings les prendra de l'environnement.
+# -----------------------------------------------------------------------------
+# Configuration de l'API Binance
+# -----------------------------------------------------------------------------
+# Les clés API Binance (api_key, api_secret) sont sensibles et devraient
+# idéalement être chargées depuis des variables d'environnement ou un fichier .env.
+# Pydantic-settings (utilisé dans config.py) les chargera automatiquement si
+# les variables d'environnement correspondantes (ex: BINANCE_API_KEY) sont définies.
+# Vous pouvez les omettre de ce fichier YAML si elles sont dans l'environnement.
 binance:
-  # api_key: ${BINANCE_API_KEY} # Exemple de substitution, mais pydantic-settings est préféré
-  # api_secret: ${BINANCE_API_SECRET} # Exemple de substitution
-  testnet: false
-  # api_key_2: ${BINANCE_API_KEY_2} # Optionnel
-  # api_secret_2: ${BINANCE_API_SECRET_2} # Optionnel
+  # api_key: "VOTRE_CLE_API_BINANCE"                 # Votre clé API Binance. Mieux dans .env (BINANCE_API_KEY)
+  # api_secret: "VOTRE_SECRET_API_BINANCE"           # Votre secret API Binance. Mieux dans .env (BINANCE_API_SECRET)
+  testnet: false              # Mettre à true pour utiliser le Testnet de Binance, false pour le trading réel.
 
-# Configuration de la base de données.
-# Si vous utilisez des variables d'environnement séparées (POSTGRES_USER, etc.),
-# la section 'database' dans YAML peut être minimale ou omise si les valeurs par défaut
-# dans DatabaseConfig (config.py) sont suffisantes ou si toutes les valeurs sont dans .env.
-# L'URL sera construite ou chargée par pydantic-settings.
+  # Support pour une deuxième paire de clés API, si nécessaire (optionnel)
+  # api_key_2: "VOTRE_CLE_API_BINANCE_SECONDAIRE"    # Mieux dans .env (BINANCE_API_KEY_2)
+  # api_secret_2: "VOTRE_SECRET_API_BINANCE_SECONDAIRE" # Mieux dans .env (BINANCE_API_SECRET_2)
+
+# -----------------------------------------------------------------------------
+# Configuration de la Base de Données
+# -----------------------------------------------------------------------------
+# La configuration de la base de données. L'URL complète (sqlalchemy_database_url)
+# sera assemblée dans config.py en fonction de ces paramètres ou des variables d'environnement.
 database:
-  db_type: "postgresql" # ou "sqlite"
-  # Pour PostgreSQL (si non entièrement défini dans .env):
+  db_type: "postgresql"       # Type de base de données: "postgresql" ou "sqlite".
+
+  # Paramètres spécifiques à PostgreSQL (utilisés si db_type est "postgresql")
+  # Ces valeurs peuvent aussi être fournies via des variables d'environnement
+  # (ex: POSTGRES_HOST, POSTGRES_USER, etc., ou une DSN complète POSTGRES_DSN).
   # pg_host: "localhost"
-  # pg_port: 5434
-  # pg_user: "your_user"       # Mieux dans .env
-  # pg_password: "your_password" # Mieux dans .env
+  # pg_port: 5432
+  # pg_user: "your_postgres_user"    # Mieux dans .env (POSTGRES_USER)
+  # pg_password: "your_postgres_password" # Mieux dans .env (POSTGRES_PASSWORD)
   # pg_db: "algobot_db"
-  # Pour SQLite:
-  # sqlite_path: "data/algobot_local.db" # ou ":memory:"
 
-  # Options de pooling (valeurs par défaut de config.py seront utilisées si non spécifiées ici)
-  pool_size: 7
-  max_overflow: 12
-  # ... autres options de pooling et de retry si vous voulez les surcharger ...
+  # Paramètres spécifiques à SQLite (utilisés si db_type est "sqlite")
+  # Le chemin sera résolu par rapport à la racine du projet si relatif.
+  sqlite_path: "data/algobot_main.db" # Chemin vers le fichier SQLite, ou ":memory:" pour une base en mémoire.
 
-# Configuration des données
+  # Paramètres SQLAlchemy (communs ou spécifiques au pooling)
+  echo: false                 # Si true, SQLAlchemy logue toutes les requêtes SQL. Utile pour le debug.
+  pool_size: 5                # Nombre de connexions à garder ouvertes dans le pool. (Défaut de config.py)
+                              # L'exemple précédent montrait 7, vous pouvez surcharger ici.
+  max_overflow: 10            # Nombre de connexions supplémentaires autorisées au-delà de pool_size. (Défaut de config.py)
+                              # L'exemple précédent montrait 12.
+  pool_timeout: 30            # Temps d'attente (secondes) pour obtenir une connexion du pool. (Défaut de config.py)
+  pool_recycle: 1800          # Temps (secondes) après lequel les connexions sont recyclées. (Défaut de config.py)
+  echo_pool: false            # Logue les événements du pool de connexion ("debug" pour plus de détails). (Défaut de config.py)
+  pool_pre_ping: true         # Teste la vivacité des connexions avant de les utiliser. (Défaut de config.py)
+
+# -----------------------------------------------------------------------------
+# Configuration des Données (Klines, etc.)
+# -----------------------------------------------------------------------------
 data:
-  storage_type: "parquet" # ou "postgres"
-  storage_path: "data/crypto_klines" # Sera résolu en chemin absolu
-  parquet_partition_cols: ["pair", "year", "month"]
-  cache_enabled: true
-  cache_ttl: 3600 # 1 heure
+  storage_type: "parquet"     # Type de stockage pour les données de marché: "parquet" ou "postgres".
+  storage_path: "data/crypto_klines_processed" # Chemin de base pour le stockage (ex: fichiers Parquet).
+                                             # Sera résolu en chemin absolu.
+  parquet_partition_cols:     # Colonnes utilisées pour partitionner les données Parquet.
+    - "pair"
+    - "year"
+    - "month"
+  cache_enabled: true         # Activer/désactiver le cache pour les données (ex: Redis ou cache en mémoire).
+  cache_ttl: 3600             # Durée de vie du cache en secondes (Time To Live). 3600s = 1 heure.
 
-# Configuration du trading
+# -----------------------------------------------------------------------------
+# Configuration du Trading
+# -----------------------------------------------------------------------------
 trading:
-  mode: "cross_margin"
-  base_currency: "USDC"
-  allowed_pairs:
+  mode: "cross_margin"        # Mode de trading sur Binance: "spot", "margin", "cross_margin", "isolated_margin".
+  base_currency: "USDC"       # Devise de base pour le calcul du P&L et la taille des positions.
+  allowed_pairs:              # Liste des paires de trading autorisées pour le bot.
     - "HBARUSDC"
     - "WIFUSDC"
-    # - "BNBUSDC" # Exemple
+    # - "BTCUSDT"
+    # - "ETHUSDT"
 
-# Configuration des risques (valeurs par défaut de config.py seront utilisées si non spécifiées)
+# -----------------------------------------------------------------------------
+# Configuration de la Gestion des Risques
+# -----------------------------------------------------------------------------
+# Les valeurs par défaut de config.py (RiskConfig) seront utilisées si non spécifiées ici.
 risk:
-  max_position_pct: 0.80 # 5%
-  # max_drawdown_pct: 0.20
-  # daily_loss_limit_pct: 0.10
+  max_position_pct: 0.05      # Pourcentage maximum du capital total alloué à une seule position (ex: 0.05 = 5%).
+  max_drawdown_pct: 0.20      # Drawdown maximum autorisé sur le portefeuille total (ex: 0.20 = 20%).
+  daily_loss_limit_pct: 0.10  # Perte journalière maximale autorisée (ex: 0.10 = 10%).
 
-# Configuration du monitoring (valeurs par défaut de config.py seront utilisées si non spécifiées)
+# -----------------------------------------------------------------------------
+# Configuration du Monitoring et du Logging
+# -----------------------------------------------------------------------------
 monitoring:
-  prometheus_enabled: false
-  # prometheus_port: 9091
-  # alert_webhook_url: "YOUR_SLACK_OR_DISCORD_WEBHOOK_URL_HERE" # Mieux dans .env
-  log_level_console: "INFO"
-  log_level_file: "DEBUG"
-  log_to_file_enabled: true
-  # log_rotation: "100 MB"
-  # log_retention: "10 days"
-  # log_compression: "gz"
+  prometheus_enabled: false   # Activer/désactiver l'exposition des métriques pour Prometheus.
+  prometheus_port: 9091       # Port pour le serveur d'exposition Prometheus.
 
-# Section Redis optionnelle (valeurs par défaut de config.py seront utilisées si non spécifiées)
-# redis:
-#   host: "localhost"
-#   port: 6379
-#   # password: ${REDIS_PASSWORD} # Mieux dans .env
+  # URL du Webhook pour les alertes (ex: Slack, Discord).
+  # Mettre la valeur réelle dans .env (ALERT_WEBHOOK_URL) ou laisser vide/None si non utilisé.
+  # Le placeholder "YOUR_..." est automatiquement converti en None par config.py.
+  # alert_webhook_url: "YOUR_SLACK_OR_DISCORD_WEBHOOK_URL_HERE"
+  alert_webhook_url: null # ou commentez la ligne si non utilisé et pas dans .env
 
+  log_level_console: "INFO"   # Niveau de log pour la sortie console: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+  log_level_file: "DEBUG"     # Niveau de log pour le fichier de log.
+  log_to_file_enabled: true   # Activer/désactiver l'écriture des logs dans un fichier.
+  log_file_path: "logs/algobot_runtime.log" # Chemin du fichier de log. Sera résolu par rapport à la racine du projet.
+  log_rotation: "100 MB"      # Taille maximale du fichier de log avant rotation (ex: "500 MB", "1 week").
+  log_retention: "10 days"    # Durée de conservation des fichiers de log après rotation.
+  log_compression: "gz"       # Format de compression pour les fichiers de log archivés (ex: "gz", "zip").
+
+# -----------------------------------------------------------------------------
+# Configuration de Redis (Optionnel)
+# -----------------------------------------------------------------------------
+# Utilisé pour le caching, la gestion de file d'attente, etc.
+# La section entière peut être omise si Redis n'est pas utilisé, config.py le gère.
+redis:
+  # host: "localhost"
+  # port: 6379
+  # password: "your_redis_password" # Mieux dans .env (REDIS_PASSWORD)
+  # db: 0 # Numéro de la base de données Redis.
+
+# -----------------------------------------------------------------------------
+# Configuration Top-Level (Exemple)
+# -----------------------------------------------------------------------------
+# La variable 'top_level_webhook_url' qui causait des erreurs dans les tests
+# était commentée dans le modèle Settings de config.py.
+# Si elle devait être une configuration valide à la racine du YAML (et non sous 'monitoring'),
+# elle serait définie ici, par exemple :
+# top_level_webhook_url: null # Ou une URL valide, ou à charger via env var TOP_LEVEL_WEBHOOK_URL
+# Actuellement, il est plus cohérent de gérer l'URL de webhook sous la section 'monitoring'.
+# Si cette clé n'est plus du tout utilisée dans config.py, elle peut être omise ici.
