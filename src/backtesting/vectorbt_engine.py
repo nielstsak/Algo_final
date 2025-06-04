@@ -8,12 +8,12 @@ from loguru import logger
 import warnings
 
 from src.core.config import settings
-from src.core.constants import Trading, Kline
+from src.core.constants import Trading, Kline # Assuming Kline might be used for freq defaults
 from src.core.exceptions import BacktestError, BacktestSetupError
 from src.backtesting.signal_adapter import SignalAdapter
-from src.backtesting.fee_calculator import BinanceFeeCalculator
-from src.backtesting.slippage_model import SlippageModel
-
+from src.backtesting.fee_calculator import BinanceFeeCalculator # Or your base FeeCalculator
+# MODIFICATION ICI: Ajout de SlippageModel à l'import
+from src.backtesting.slippage_model import SlippageModel, FixedSlippageModel, VolumeBasedSlippageModel 
 
 class VectorBTEngine:
     """
@@ -25,374 +25,278 @@ class VectorBTEngine:
     def __init__(
         self,
         initial_capital: float = 10000.0,
-        commission: Optional[float] = None,
-        slippage: Optional[float] = None,
+        commission: Optional[float] = None, # Fixed commission rate from CLI
+        slippage: Optional[float] = None,   # Fixed slippage rate from CLI
         leverage: float = 1.0,
         margin_mode: str = "cross",
-        freq: Optional[str] = None,
+        freq: Optional[str] = None, # e.g., '1h', '1d'. VectorBT will parse this.
         trade_on_close: bool = False,
         allow_shorting: bool = True,
         size_type: str = 'percent',
         default_size: float = 0.1
     ):
-        """
-        Initialise le moteur de backtesting.
-        
-        Args:
-            initial_capital: Capital initial
-            commission: Commission (si None, utilise BinanceFeeCalculator)
-            slippage: Slippage en pourcentage (si None, utilise SlippageModel)
-            leverage: Levier maximum
-            margin_mode: Mode de marge ("cross" ou "isolated")
-            freq: Fréquence des données
-            trade_on_close: Exécuter les trades à la clôture
-            allow_shorting: Autoriser les positions courtes
-            size_type: Type de taille ('percent', 'amount', 'value')
-            default_size: Taille par défaut des positions
-        """
         self.initial_capital = initial_capital
         self.leverage = leverage
         self.margin_mode = margin_mode
-        self.freq = freq
+        self.freq = freq 
         self.trade_on_close = trade_on_close
         self.allow_shorting = allow_shorting
         self.size_type = size_type
         self.default_size = default_size
         
-        # Calculateurs de frais et slippage
-        self.fee_calculator = BinanceFeeCalculator() if commission is None else None
-        self.slippage_model = SlippageModel() if slippage is None else None
-        self.fixed_commission = commission
-        self.fixed_slippage = slippage
-        
-        # Adaptateur de signaux
+        self.fixed_commission_rate_from_cli = commission
+        self.fixed_slippage_rate_from_cli = slippage
+
+        if self.fixed_commission_rate_from_cli is None:
+            self.fee_calculator_instance: Optional[BinanceFeeCalculator] = BinanceFeeCalculator() 
+            logger.info("Using dynamic BinanceFeeCalculator.")
+        else:
+            self.fee_calculator_instance = None
+            logger.info(f"Using fixed commission rate from CLI: {self.fixed_commission_rate_from_cli*100:.4f}%")
+
+        if self.fixed_slippage_rate_from_cli is None:
+            # Type hint pour l'instance du modèle de slippage
+            self.slippage_model_instance: Optional[SlippageModel] = FixedSlippageModel() 
+            logger.info(f"Using dynamic {type(self.slippage_model_instance).__name__}.")
+        else:
+            self.slippage_model_instance = None
+            logger.info(f"Using fixed slippage rate from CLI: {self.fixed_slippage_rate_from_cli*100:.4f}%")
+            
         self.signal_adapter = SignalAdapter()
         
-        # Cache des résultats
-        self._last_portfolio = None
-        self._last_stats = None
+        self._last_portfolio: Optional[vbt.Portfolio] = None
+        self._last_stats: Optional[pd.Series] = None
         
         logger.info(
             f"VectorBTEngine initialized: capital={initial_capital}, "
-            f"leverage={leverage}, margin_mode={margin_mode}"
+            f"leverage={leverage}, margin_mode={margin_mode}, freq='{self.freq}'"
         )
         
-    def run_backtest(
-        self,
-        data: pd.DataFrame,
-        signals: pd.DataFrame,
-        symbol: str,
-        **kwargs
-    ) -> 'vbt.Portfolio':
-        """
-        Exécute un backtest sur les données et signaux fournis.
-        
-        Args:
-            data: DataFrame avec les données OHLCV
-            signals: DataFrame avec les signaux de trading
-            symbol: Symbole tradé
-            **kwargs: Paramètres additionnels pour VectorBT
-            
-        Returns:
-            Portfolio VectorBT avec les résultats
-        """
-        try:
-            # Valider les entrées
-            self._validate_inputs(data, signals)
-            
-            # Adapter les signaux au format VectorBT
-            entries, exits, size = self.signal_adapter.adapt_signals(
-                signals,
-                allow_shorting=self.allow_shorting,
-                size_type=self.size_type,
-                default_size=self.default_size
-            )
-            
-            # Calculer les frais et slippage
-            fees = self._calculate_fees(data, symbol)
-            slippage = self._calculate_slippage(data, symbol)
-            
-            # Configurer les paramètres du portfolio
-            portfolio_params = self._prepare_portfolio_params(
-                data, entries, exits, size, fees, slippage, **kwargs
-            )
-            
-            # Exécuter le backtest
-            portfolio = vbt.Portfolio.from_signals(**portfolio_params)
-            
-            # Sauvegarder les résultats
-            self._last_portfolio = portfolio
-            self._last_stats = portfolio.stats()
-            
-            logger.info(f"Backtest completed for {symbol}")
-            return portfolio
-            
-        except Exception as e:
-            logger.error(f"Backtest failed: {e}")
-            raise BacktestError(f"Failed to run backtest: {e}", original_exception=e)
-            
-    def _validate_inputs(self, data: pd.DataFrame, signals: pd.DataFrame):
-        """Valide les données et signaux d'entrée."""
-        if data.empty:
-            raise BacktestSetupError("Empty data provided")
-            
-        if signals.empty:
-            raise BacktestSetupError("Empty signals provided")
-            
-        # Vérifier l'alignement des index
-        if not data.index.equals(signals.index):
-            logger.warning("Data and signals indices don't match perfectly")
-            
-        # Vérifier les colonnes requises
-        required_data_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_data_cols if col not in data.columns]
-        if missing_cols:
-            raise BacktestSetupError(f"Missing required columns in data: {missing_cols}")
-            
     def _calculate_fees(
         self,
-        data: pd.DataFrame,
+        data: pd.DataFrame, 
         symbol: str
     ) -> Union[float, pd.Series]:
-        """
-        Calcule les frais de trading.
+        if self.fixed_commission_rate_from_cli is not None:
+            return self.fixed_commission_rate_from_cli
         
-        Returns:
-            Frais fixes ou série de frais variables
-        """
-        if self.fixed_commission is not None:
-            return self.fixed_commission
-            
-        if self.fee_calculator:
-            return self.fee_calculator.calculate_fees(
-                data,
-                symbol,
-                is_maker=not self.trade_on_close  # Limit orders are makers
-            )
+        if self.fee_calculator_instance:
+            is_maker = not self.trade_on_close 
+            return self.fee_calculator_instance.calculate_fees(data, symbol, is_maker=is_maker)
         
-        # Par défaut, utiliser les frais Binance standards
-        return 0.001  # 0.1%
-        
+        logger.warning("No fee model or fixed rate defined, defaulting to 0.1% fees.")
+        return 0.001
+
     def _calculate_slippage(
         self,
-        data: pd.DataFrame,
+        data: pd.DataFrame, 
         symbol: str
     ) -> Union[float, pd.Series]:
-        """
-        Calcule le slippage.
-        
-        Returns:
-            Slippage fixe ou série de slippage variable
-        """
-        if self.fixed_slippage is not None:
-            return self.fixed_slippage
+        if self.fixed_slippage_rate_from_cli is not None:
+            return self.fixed_slippage_rate_from_cli
             
-        if self.slippage_model:
-            return self.slippage_model.calculate_slippage(
-                data,
-                symbol,
-                self.trade_on_close
+        if self.slippage_model_instance:
+            return self.slippage_model_instance.calculate_slippage(
+                data, 
+                symbol, 
+                trade_on_close=self.trade_on_close
             )
+
+        logger.warning("No slippage model or fixed rate defined, defaulting to 0.01% slippage.")
+        return 0.0001
+
+    def _validate_inputs(self, data: pd.DataFrame, signals: pd.DataFrame):
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            raise BacktestSetupError("Data must be a non-empty pandas DataFrame.")
+        if not isinstance(signals, pd.DataFrame) or signals.empty:
+            # Allow empty signals if data is also empty (e.g. no data for period)
+            if not data.empty:
+                 raise BacktestSetupError("Signals must be a non-empty pandas DataFrame if data is present.")
+            else: # Both empty, this is okay, backtest will be trivial
+                logger.info("Data and signals are both empty. Backtest will be trivial.")
+                return
+
+
+        required_data_cols = ['open', 'high', 'low', 'close'] 
+        missing_cols = [col for col in required_data_cols if col not in data.columns]
+        if missing_cols:
+            raise BacktestSetupError(f"Missing required columns in data: {missing_cols}. Expected lowercase OHLC.")
             
-        # Par défaut, slippage minime
-        return 0.0001  # 0.01%
-        
+        if not data.index.equals(signals.index) and not (data.empty or signals.empty):
+            logger.warning("Data and signals indices do not match perfectly. Attempting to align signals to data index.")
+            try:
+                # Prioritize data index, reindex signals, ffill for entries/exits, specific fill for others
+                original_signal_columns = signals.columns.tolist()
+                signals = signals.reindex(data.index)
+                for col in original_signal_columns:
+                    if 'entry' in col or 'exit' in col: # Boolean signals
+                        signals[col] = signals[col].fillna(False)
+                    # For 'sl', 'tp', 'size', NaN is often appropriate if no signal at that point
+                    # Default reindex behavior (NaN fill) is usually fine for these numeric/optional columns
+                logger.info("Successfully reindexed signals to match data index.")
+            except Exception as e:
+                raise BacktestSetupError(f"Failed to align signals index with data index: {e}")
+
+
+        for col in ['entries', 'exits', 'short_entries', 'short_exits']:
+            if col in signals.columns and signals[col].notna().any() and not pd.api.types.is_bool_dtype(signals[col]):
+                logger.warning(f"Signal column '{col}' is not boolean. Attempting to convert.")
+                try:
+                    signals[col] = signals[col].astype(bool)
+                except Exception as e:
+                    raise BacktestSetupError(f"Failed to convert signal column '{col}' to boolean: {e}")
+
     def _prepare_portfolio_params(
         self,
-        data: pd.DataFrame,
-        entries: pd.DataFrame,
-        exits: pd.DataFrame,
-        size: pd.DataFrame,
+        data: pd.DataFrame, 
+        entries: pd.Series,
+        exits: pd.Series,
+        size: Optional[Union[float, pd.Series]], 
         fees: Union[float, pd.Series],
         slippage: Union[float, pd.Series],
+        short_entries: Optional[pd.Series] = None,
+        short_exits: Optional[pd.Series] = None,
+        sl_stop: Optional[Union[float, pd.Series]] = None, 
+        tp_stop: Optional[Union[float, pd.Series]] = None, 
         **kwargs
     ) -> Dict[str, Any]:
-        """
-        Prépare les paramètres pour VectorBT Portfolio.
-        
-        Returns:
-            Dict avec tous les paramètres configurés
-        """
         params = {
-            'close': data['close'],
+            'close': data['close'], 
+            'open': data['open'],   
+            'high': data['high'],   
+            'low': data['low'],     
             'entries': entries,
             'exits': exits,
-            'size': size,
+            'short_entries': short_entries,
+            'short_exits': short_exits,
+            'size': size if size is not None else self.default_size, 
+            'size_type': self.size_type, 
             'fees': fees,
             'slippage': slippage,
             'init_cash': self.initial_capital,
-            'freq': self.freq,
+            'freq': self.freq, 
             'direction': 'both' if self.allow_shorting else 'longonly',
-            'accumulate': False,  # Ne pas accumuler les positions
-            'sl_stop': None,  # Géré par les signaux
-            'tp_stop': None,  # Géré par les signaux
-            'call_seq': 'auto',  # Ordre d'exécution automatique
+            'accumulate': False, 
+            'sl_stop': sl_stop, 
+            'tp_stop': tp_stop, 
+            'trade_on_close': self.trade_on_close, 
+            'call_seq': 'slbtp' if (sl_stop is not None or tp_stop is not None) else 'default',
         }
         
-        # Prix d'exécution
-        if self.trade_on_close:
-            params['price'] = data['close']
-        else:
-            params['price'] = data['open'].shift(-1)  # Prix d'ouverture suivant
-            
-        # Ajouter les paramètres personnalisés
         params.update(kwargs)
-        
+        # More selective logging for large series
+        loggable_params = {}
+        for k, v_item in params.items(): # Renamed v to v_item
+            if isinstance(v_item, (pd.Series, pd.DataFrame)) and len(v_item) > 10:
+                loggable_params[k] = f"{type(v_item).__name__}(len={len(v_item)})"
+            elif isinstance(v_item, (pd.Series, pd.DataFrame)): # Short series
+                 loggable_params[k] = f"{type(v_item).__name__}({v_item.to_dict() if isinstance(v_item, pd.Series) else 'DataFrame'})"
+            else:
+                loggable_params[k] = v_item
+        logger.debug(f"Portfolio.from_signals params: {loggable_params}")
         return params
-        
+
+    def run_backtest(
+        self,
+        data: pd.DataFrame, 
+        signals: pd.DataFrame, 
+        symbol: str,
+        **kwargs 
+    ) -> vbt.Portfolio:
+        try:
+            self._validate_inputs(data, signals) # signals might be modified here if reindexed
+            
+            entries = signals.get('entries', pd.Series(False, index=data.index))
+            exits = signals.get('exits', pd.Series(False, index=data.index))
+            
+            short_entries = signals.get('short_entries', None) if self.allow_shorting else None
+            short_exits = signals.get('short_exits', None) if self.allow_shorting else None
+            
+            size_input_for_vbt = signals.get('size', None) 
+
+            sl_stop_values = signals.get('sl', None) 
+            tp_stop_values = signals.get('tp', None)
+
+            fees_rate = self._calculate_fees(data, symbol)
+            slippage_rate = self._calculate_slippage(data, symbol)
+            
+            portfolio_params = self._prepare_portfolio_params(
+                data, entries, exits, size_input_for_vbt, fees_rate, slippage_rate,
+                short_entries=short_entries, short_exits=short_exits,
+                sl_stop=sl_stop_values, tp_stop=tp_stop_values,
+                **kwargs
+            )
+            
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning) 
+                portfolio = vbt.Portfolio.from_signals(**portfolio_params)
+            
+            self._last_portfolio = portfolio
+            if portfolio.trades.count() > 0:
+                self._last_stats = portfolio.stats(settings=dict(risk_free_rate=0.0)) # Pass default risk_free_rate
+            else:
+                self._last_stats = pd.Series(dtype=float) 
+            
+            logger.info(f"Backtest completed for {symbol}. Trades: {portfolio.trades.count()}. Final Val: {portfolio.value().iloc[-1]:.2f}")
+            return portfolio
+            
+        except Exception as e:
+            logger.error(f"Backtest failed for {symbol}: {e}", exc_info=True)
+            raise BacktestError(f"Failed to run backtest for {symbol}: {e}", original_exception=e)
+
     def run_multiple_backtests(
         self,
         data: pd.DataFrame,
-        signals_dict: Dict[str, pd.DataFrame],
+        signals_dict: Dict[str, pd.DataFrame], 
         symbol: str,
         compare: bool = True
-    ) -> Dict[str, 'vbt.Portfolio']:
-        """
-        Exécute plusieurs backtests pour comparer différentes stratégies.
-        
-        Args:
-            data: DataFrame avec les données OHLCV
-            signals_dict: Dict {strategy_name: signals_df}
-            symbol: Symbole tradé
-            compare: Si True, génère une comparaison
-            
-        Returns:
-            Dict avec les portfolios par stratégie
-        """
+    ) -> Dict[str, vbt.Portfolio]:
         results = {}
-        
-        for strategy_name, signals in signals_dict.items():
-            logger.info(f"Running backtest for {strategy_name}")
+        for name, signals_df in signals_dict.items():
+            logger.info(f"Running backtest for variant: {name} on {symbol}")
             try:
-                portfolio = self.run_backtest(data, signals, symbol)
-                results[strategy_name] = portfolio
+                # Ensure data and signals are fresh copies for each run if they were modified
+                portfolio = self.run_backtest(data.copy(), signals_df.copy(), symbol)
+                results[name] = portfolio
             except Exception as e:
-                logger.error(f"Backtest failed for {strategy_name}: {e}")
-                
+                logger.error(f"Backtest failed for {name} on {symbol}: {e}")
+        
         if compare and len(results) > 1:
             self._generate_comparison(results)
-            
         return results
-        
-    def _generate_comparison(self, portfolios: Dict[str, 'vbt.Portfolio']):
-        """Génère une comparaison entre plusieurs portfolios."""
-        # Extraire les métriques clés
+
+    def _generate_comparison(self, portfolios: Dict[str, vbt.Portfolio]):
         comparison_data = []
-        
+        # Ensure there's at least one portfolio to get the symbol from
+        first_pf_key = next(iter(portfolios), None)
+        symbol_for_log = portfolios[first_pf_key].symbol if first_pf_key and hasattr(portfolios[first_pf_key], 'symbol') else 'N/A'
+
         for name, portfolio in portfolios.items():
-            stats = portfolio.stats()
+            stats = portfolio.stats(settings=dict(risk_free_rate=0.0)) if portfolio.trades.count() > 0 else pd.Series(dtype=float)
             comparison_data.append({
-                'Strategy': name,
-                'Total Return [%]': stats.get('Total Return [%]', 0),
-                'Sharpe Ratio': stats.get('Sharpe Ratio', 0),
-                'Max Drawdown [%]': stats.get('Max Drawdown [%]', 0),
-                'Win Rate [%]': stats.get('Win Rate [%]', 0),
-                'Total Trades': stats.get('Total Trades', 0)
+                'Strategy/Variant': name,
+                'Total Return [%]': stats.get('Total Return [%]', np.nan),
+                'Sharpe Ratio': stats.get('Sharpe Ratio', np.nan),
+                'Max Drawdown [%]': stats.get('Max Drawdown [%]', np.nan),
+                'Win Rate [%]': stats.get('Win Rate [%]', np.nan),
+                'Total Trades': portfolio.trades.count() 
             })
-            
-        comparison_df = pd.DataFrame(comparison_data)
-        comparison_df.set_index('Strategy', inplace=True)
-        
-        logger.info("Strategy Comparison:")
-        logger.info(f"\n{comparison_df}")
-        
+        comparison_df = pd.DataFrame(comparison_data).set_index('Strategy/Variant')
+        logger.info(f"Strategy Comparison for {symbol_for_log}:\n{comparison_df.to_string(float_format='%.2f')}")
         return comparison_df
-        
-    def optimize_parameters(
-        self,
-        data: pd.DataFrame,
-        strategy_func: callable,
-        param_grid: Dict[str, List[Any]],
-        symbol: str,
-        metric: str = 'sharpe_ratio',
-        n_jobs: int = -1
-    ) -> Tuple[Dict[str, Any], pd.DataFrame]:
-        """
-        Optimise les paramètres d'une stratégie.
-        
-        Args:
-            data: DataFrame avec les données OHLCV
-            strategy_func: Fonction qui génère les signaux
-            param_grid: Grille de paramètres à tester
-            symbol: Symbole tradé
-            metric: Métrique à optimiser
-            n_jobs: Nombre de jobs parallèles
-            
-        Returns:
-            Tuple (best_params, results_df)
-        """
-        from itertools import product
-        
-        # Générer toutes les combinaisons
-        param_names = list(param_grid.keys())
-        param_values = list(param_grid.values())
-        param_combinations = list(product(*param_values))
-        
-        results = []
-        
-        for combination in param_combinations:
-            params = dict(zip(param_names, combination))
-            
-            try:
-                # Générer les signaux avec ces paramètres
-                signals = strategy_func(data, **params)
-                
-                # Exécuter le backtest
-                portfolio = self.run_backtest(data, signals, symbol)
-                
-                # Extraire la métrique
-                stats = portfolio.stats()
-                metric_value = self._extract_metric(stats, metric)
-                
-                result = params.copy()
-                result[metric] = metric_value
-                results.append(result)
-                
-            except Exception as e:
-                logger.warning(f"Failed with params {params}: {e}")
-                
-        # Créer le DataFrame des résultats
-        results_df = pd.DataFrame(results)
-        
-        # Trouver les meilleurs paramètres
-        best_idx = results_df[metric].idxmax()
-        best_params = results_df.loc[best_idx].to_dict()
-        del best_params[metric]  # Retirer la métrique des paramètres
-        
-        logger.info(f"Best parameters: {best_params}")
-        logger.info(f"Best {metric}: {results_df.loc[best_idx, metric]}")
-        
-        return best_params, results_df
-        
-    def _extract_metric(self, stats: pd.Series, metric: str) -> float:
-        """Extrait une métrique spécifique des statistiques."""
-        metric_map = {
-            'sharpe_ratio': 'Sharpe Ratio',
-            'total_return': 'Total Return [%]',
-            'max_drawdown': 'Max Drawdown [%]',
-            'win_rate': 'Win Rate [%]',
-            'profit_factor': 'Profit Factor',
-            'calmar_ratio': 'Calmar Ratio'
-        }
-        
-        vbt_metric = metric_map.get(metric, metric)
-        value = stats.get(vbt_metric, np.nan)
-        
-        # Inverser les métriques négatives pour l'optimisation
-        if metric in ['max_drawdown']:
-            value = -value
-            
-        return value
-        
+
     def get_last_results(self) -> Optional[Dict[str, Any]]:
-        """Retourne les derniers résultats de backtest."""
         if self._last_portfolio is None:
             return None
-            
-        return {
+        
+        results = {
             'portfolio': self._last_portfolio,
-            'stats': self._last_stats,
-            'equity_curve': self._last_portfolio.value(),
-            'drawdown': self._last_portfolio.drawdown(),
-            'trades': self._last_portfolio.trades.records_arr
+            'stats': self._last_stats if self._last_stats is not None else pd.Series(dtype=float),
+            'equity_curve': self._last_portfolio.value(), 
+            'drawdown_curve': self._last_portfolio.drawdown(), 
         }
+        if self._last_portfolio.trades.count() > 0:
+            results['trades_records'] = self._last_portfolio.trades.records_readable 
+        else:
+            results['trades_records'] = pd.DataFrame()
+        return results

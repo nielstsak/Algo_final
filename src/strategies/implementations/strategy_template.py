@@ -8,11 +8,11 @@ import pandas as pd
 # Importations nécessaires depuis votre projet
 try:
     # Essayer d'importer depuis le chemin relatif .base (pour le chargement par strategy_loader)
-    from ..base import BaseStrategy # Ajustez si BaseStrategy est ailleurs
+    from ..base_strategy import BaseStrategy # Ajustez si BaseStrategy est ailleurs
 except ImportError:
     # Fallback pour les tests ou exécution directe
     try:
-        from src.strategies.base import BaseStrategy
+        from src.strategies.base_strategy import BaseStrategy
     except ImportError:
         logging.getLogger(__name__).critical("StrategyTemplate: CRITICAL - BaseStrategy not found.")
         # Définition factice minimale pour éviter les erreurs d'import globales si tout échoue

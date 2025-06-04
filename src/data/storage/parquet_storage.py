@@ -22,7 +22,7 @@ class ParquetStorage(BaseStorage):
     Utilise le partitionnement par paire/année/mois pour optimiser les performances.
     """
     
-    def __init__(self, storage_path: Path):
+    def __init__(self, storage_path : Path):
         """
         Initialise le stockage Parquet.
         
@@ -257,6 +257,7 @@ class ParquetStorage(BaseStorage):
                 original_exception=e
             )
             
+
     async def get_klines(
         self,
         pair: str,
@@ -287,45 +288,95 @@ class ParquetStorage(BaseStorage):
                 logger.debug(f"No data found for {pair} at {interval}")
                 return None
                 
-            # Construire les filtres PyArrow
-            filters = []
+            # Construire les filtres PyArrow DNF
+            final_dnf_filters = []
+
+            # Helper to create DNF for a single condition (e.g., start or end)
+            def create_time_dnf(time_val: datetime, is_start: bool, partition_cols: List[str]) -> Optional[List[List[Tuple[str, str, Any]]]]:
+                dnf = []
+                year_partition = 'year' in partition_cols
+                month_partition = 'month' in partition_cols
+
+                if year_partition and month_partition:
+                    if is_start:
+                        # (year > time_val.year) OR (year == time_val.year AND month >= time_val.month)
+                        dnf = [
+                            [('year', '>', time_val.year)],
+                            [('year', '==', time_val.year), ('month', '>=', time_val.month)]
+                        ]
+                    else: # is_end
+                        # (year < time_val.year) OR (year == time_val.year AND month <= time_val.month)
+                        dnf = [
+                            [('year', '<', time_val.year)],
+                            [('year', '==', time_val.year), ('month', '<=', time_val.month)]
+                        ]
+                elif year_partition: # Only year partition
+                    if is_start:
+                        dnf = [[('year', '>=', time_val.year)]]
+                    else: # is_end
+                        dnf = [[('year', '<=', time_val.year)]]
+                # If no relevant partitions, DNF remains empty, relying on Pandas filtering
+                return dnf if dnf else None
+
+            start_dnf = None
+            if start_time:
+                start_dnf = create_time_dnf(start_time, True, self.partition_cols)
+
+            end_dnf = None
+            if end_time:
+                end_dnf = create_time_dnf(end_time, False, self.partition_cols)
+
+            if start_dnf and end_dnf:
+                # Combine S_dnf AND E_dnf:
+                # (S_conj1 OR S_conj2 ...) AND (E_conj1 OR E_conj2 ...)
+                # = (S_conj1 AND E_conj1) OR (S_conj1 AND E_conj2) OR ...
+                for s_conj in start_dnf:
+                    for e_conj in end_dnf:
+                        # Check for contradictions like year > X AND year < X if SY == EY for simple cases
+                        # More complex contradiction checks are harder. Assume valid ranges for now.
+                        final_dnf_filters.append(s_conj + e_conj)
+            elif start_dnf:
+                final_dnf_filters = start_dnf
+            elif end_dnf:
+                final_dnf_filters = end_dnf
             
-            if start_time is not None:
-                # Ajouter les filtres sur year/month si utilisés dans le partitionnement
-                if 'year' in self.partition_cols:
-                    filters.append(('year', '>=', start_time.year))
-                if 'month' in self.partition_cols and 'year' in self.partition_cols:
-                    # Filtre plus complexe pour year/month
-                    filters.append(
-                        (('year', '>', start_time.year), 
-                         ('year', '==', start_time.year), ('month', '>=', start_time.month))
-                    )
-                    
-            if end_time is not None:
-                if 'year' in self.partition_cols:
-                    filters.append(('year', '<=', end_time.year))
-                if 'month' in self.partition_cols and 'year' in self.partition_cols:
-                    filters.append(
-                        (('year', '<', end_time.year),
-                         ('year', '==', end_time.year), ('month', '<=', end_time.month))
-                    )
-                    
+            # Ensure final_dnf_filters is None if empty, so pq.read_table doesn't receive an empty list
+            # which might be interpreted as "match nothing".
+            # If final_dnf_filters is [], it means no partition filters were applicable or generated.
+            # pq.read_table with filters=None or filters=[] (if it means no filters) reads all partitions.
+            # According to pyarrow docs, filters=None reads all. An empty list for filters might be an error or select nothing.
+            # It's safer to pass None if no filters are intended.
+            pq_filters_arg = final_dnf_filters if final_dnf_filters else None
+
             # Fonction de lecture synchrone
             def _read():
-                df = self._read_parquet_table(table_path, filters if filters else None)
+                # Pass None if final_dnf_filters is empty
+                df = self._read_parquet_table(table_path, filters=pq_filters_arg)
                 
                 if df is None or df.empty:
                     return None
                     
-                # Appliquer les filtres temporels précis
+                # Appliquer les filtres temporels précis sur le DataFrame chargé
+                # This is crucial as partition filters are coarse.
                 if start_time is not None:
-                    df = df[df.index >= start_time]
+                    df = df[df.index >= start_time] # Assumes index is DatetimeIndex
                 if end_time is not None:
-                    df = df[df.index <= end_time]
+                    df = df[df.index <= end_time] # Assumes index is DatetimeIndex
                     
-                # Appliquer la limite
-                if limit is not None and len(df) > limit:
-                    df = df.iloc[-limit:]  # Prendre les plus récentes
+                # Appliquer la limite (après all filters, typically on sorted data)
+                # The problem description doesn't specify sorting for limit,
+                # but usually, limit implies latest N records if time-series.
+                # The original code sorts by index after loading in _read_parquet_table.
+                # If limit is to be applied, it should generally be on the final, sorted DataFrame.
+                if limit is not None:
+                    if not df.empty:
+                        # Ensure DataFrame is sorted by index if not already
+                        if not df.index.is_monotonic_increasing:
+                             df.sort_index(inplace=True) # Sort if not already sorted for consistent limit application
+                        # Take the most recent 'limit' records if data is chronological
+                        # Or first 'limit' records if that's the desire for other types of limits.
+                        # Assuming "latest N" for time series:
+                        df = df.iloc[-limit:] 
                     
                 return df
                 
@@ -339,11 +390,15 @@ class ParquetStorage(BaseStorage):
             
         except Exception as e:
             logger.error(f"Failed to get klines for {pair}: {e}")
+            # Ensure original exception type is preserved if it's already a ParquetStorageError
+            if isinstance(e, ParquetStorageError):
+                raise
             raise ParquetStorageError(
-                f"Failed to get klines: {e}",
+                f"Failed to get klines for {pair}: {e}",
                 original_exception=e
             )
-            
+
+    # ... (rest of the class)
     async def get_available_pairs(self) -> List[str]:
         """
         Retourne la liste des paires disponibles dans le stockage.
