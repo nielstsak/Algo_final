@@ -1,10 +1,11 @@
 # src/strategies/base_strategy.py
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Any, Tuple, Union
-import pandas as pd
+from typing import Dict, List, Optional, Any, Union, Type
+
 import numpy as np
-from datetime import datetime
+import pandas as pd
 from loguru import logger
+from pydantic import create_model, ValidationError
 
 from src.core.constants import Trading, Kline, DataFrameCols
 from src.core.exceptions import (
@@ -13,12 +14,14 @@ from src.core.exceptions import (
     SignalGenerationError,
     IndicatorCalculationError
 )
+from src.data.enriched_dataframe import EnrichedDataFrame
+from src.strategies.params import BaseFixedParams, BaseOptimizableParams
 
 
 class BaseStrategy(ABC):
     """
     Classe abstraite de base pour toutes les stratégies de trading.
-    Fournit une interface standardisée pour le développement de stratégies.
+    Fournit une interface standardisée et une configuration déclarative via Pydantic.
     """
     
     # Attributs de classe pour identifier la stratégie
@@ -26,340 +29,231 @@ class BaseStrategy(ABC):
     version: str = "1.0.0"
     description: str = "Abstract base strategy class"
     
-    # Paramètres par défaut (à surcharger dans les sous-classes)
-    default_params: Dict[str, Any] = {}
-    
     # Intervalles de temps requis par la stratégie
     required_timeframes: List[str] = [Kline.INTERVAL_1MINUTE]
     
     # Nombre minimum de périodes requises pour le calcul
     min_required_periods: int = 100
     
+    # 'Slots' pour les modèles Pydantic. A surcharger dans les sous-classes.
+    fixed_params_model: Type[BaseFixedParams] = BaseFixedParams
+    optimizable_params_model: Type[BaseOptimizableParams] = BaseOptimizableParams
+    
+    # Paramètres par défaut legacy (maintenu pour compatibilité)
+    default_params: Dict[str, Any] = {}
+    
     def __init__(self, params: Optional[Dict[str, Any]] = None, **kwargs):
         """
         Initialise la stratégie avec les paramètres fournis.
+        Fusionne les paramètres des modèles Pydantic, les params par défaut, 
+        le dictionnaire `params` et les `kwargs`, puis valide le tout.
         
         Args:
-            params: Dictionnaire des paramètres de la stratégie
-            **kwargs: Paramètres additionnels passés directement
+            params: Dictionnaire des paramètres de la stratégie.
+            **kwargs: Paramètres additionnels passés directement.
         """
-        # Fusionner les paramètres
-        self.params = self.default_params.copy()
-        if params:
-            self.params.update(params)
-        self.params.update(kwargs)
+        # 1. Obtenir les valeurs par défaut des modèles Pydantic
+        fixed_defaults = self.fixed_params_model().model_dump()
+        optimizable_defaults = self.optimizable_params_model().model_dump()
+
+        # 2. Fusionner les paramètres avec l'ordre de priorité suivant :
+        #    Pydantic < default_params < dictionnaire `params` < kwargs
+        all_defaults = {**fixed_defaults, **optimizable_defaults, **self.default_params}
+        self.params = {**all_defaults, **(params or {}), **kwargs}
         
-        # Valider les paramètres
         self.validate_params()
         
-        # Initialiser les caches
-        self._indicators_cache: Dict[str, pd.DataFrame] = {}
+        # Initialisation des caches et logging
+        self._indicators_cache: Optional[pd.DataFrame] = None
         self._signals_cache: Optional[pd.DataFrame] = None
         
         logger.debug(f"Initialized {self.name} with params: {self.params}")
-        
-    @abstractmethod
+
     def validate_params(self) -> None:
         """
-        Valide les paramètres de la stratégie.
-        Doit lever InvalidStrategyParamsError si invalides.
+        Valide les paramètres de la stratégie en utilisant un modèle Pydantic 
+        combiné dynamiquement à partir des modèles `fixed` et `optimizable`.
+        Lève InvalidStrategyParamsError en cas d'échec de la validation.
         """
-        pass
-        
-    @abstractmethod
-    def calculate_indicators(
-        self,
-        klines: Dict[str, pd.DataFrame]
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Calcule les indicateurs techniques nécessaires.
-        
-        Args:
-            klines: Dict avec les klines pour chaque timeframe
-                   {timeframe: DataFrame avec colonnes OHLCV}
-                   
-        Returns:
-            Dict avec les indicateurs calculés par timeframe
-            
-        Raises:
-            IndicatorCalculationError: Si erreur dans le calcul
-        """
-        pass
-        
-    @abstractmethod
-    def generate_signals(
-        self,
-        indicators: Dict[str, pd.DataFrame]
-    ) -> pd.DataFrame:
-        """
-        Génère les signaux de trading basés sur les indicateurs.
-        
-        Args:
-            indicators: Dict avec les indicateurs par timeframe
-            
-        Returns:
-            DataFrame avec colonnes:
-            - signal: 1 (long), -1 (short), 0 (neutre)
-            - entry_price: Prix d'entrée suggéré
-            - stop_loss: Niveau de stop loss
-            - take_profit: Niveau de take profit
-            - confidence: Score de confiance [0-1]
-            
-        Raises:
-            SignalGenerationError: Si erreur dans la génération
-        """
-        pass
-        
-    def execute(
-        self,
-        klines: Dict[str, pd.DataFrame],
-        current_position: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Exécute la stratégie complète et retourne les signaux formatés.
-        
-        Args:
-            klines: Dict avec les klines pour chaque timeframe
-            current_position: Position actuelle (optionnel)
-            
-        Returns:
-            Liste de signaux au format standardisé
-        """
+        # Créer un modèle Pydantic combiné à la volée
+        CombinedParamsModel = create_model(
+            'CombinedParamsModel',
+            __base__=(self.fixed_params_model, self.optimizable_params_model)
+        )
+
         try:
-            # Vérifier les données d'entrée
-            self._validate_klines(klines)
-            
-            # Calculer les indicateurs
-            indicators = self.calculate_indicators(klines)
-            
-            # Générer les signaux
-            signals_df = self.generate_signals(indicators)
-            
-            # Formater les signaux
-            formatted_signals = self._format_signals(
-                signals_df,
-                klines,
-                current_position
-            )
-            
-            return formatted_signals
-            
-        except Exception as e:
-            logger.error(f"Error executing strategy {self.name}: {e}")
-            raise StrategyError(
-                f"Strategy execution failed: {e}",
-                strategy_name=self.name,
-                original_exception=e
-            )
-            
-    def _validate_klines(self, klines: Dict[str, pd.DataFrame]) -> None:
-        """
-        Valide les données klines d'entrée.
+            # Valider l'ensemble des paramètres de l'instance
+            CombinedParamsModel(**self.params)
+        except ValidationError as e:
+            # Encapsuler l'erreur Pydantic dans une exception personnalisée
+            raise InvalidStrategyParamsError(
+                f"Strategy parameter validation failed for {self.__class__.__name__}: {e.errors()}",
+                strategy_name=self.name
+            ) from e
+
+    def get_param(self, key: str, default: Any = None) -> Any:
+        return self.params.get(key, default)
         
-        Args:
-            klines: Dict avec les klines par timeframe
-            
-        Raises:
-            StrategyError: Si données invalides
-        """
-        # Vérifier que tous les timeframes requis sont présents
-        for tf in self.required_timeframes:
-            if tf not in klines:
+    def _prepare_indicator_data(self, data: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"]) -> pd.DataFrame:
+        indicator_freq = self.get_param('indicator_frequency')
+        if not indicator_freq:
+            raise InvalidStrategyParamsError(
+                strategy_name=self.name,
+                parameter_name='indicator_frequency',
+                details="Le paramètre 'indicator_frequency' doit être défini."
+            )
+
+        if isinstance(data, EnrichedDataFrame):
+            try:
+                logger.debug(f"[{self.name}] Extraction de la vue '{indicator_freq}' depuis EnrichedDataFrame.")
+                return data.get_view(indicator_freq)
+            except ValueError as e:
                 raise StrategyError(
-                    f"Missing required timeframe: {tf}",
-                    strategy_name=self.name
+                    f"Échec de l'obtention de la vue pour la fréquence '{indicator_freq}'. {e}",
+                    strategy_name=self.name, original_exception=e
                 )
-                
-        # Vérifier chaque DataFrame
-        for tf, df in klines.items():
+        elif isinstance(data, dict):
+            logger.debug(f"[{self.name}] Utilisation du DataFrame '{indicator_freq}' depuis le dictionnaire.")
+            df = data.get(indicator_freq)
             if df is None or df.empty:
                 raise StrategyError(
-                    f"Empty data for timeframe: {tf}",
+                    f"DataFrame requis pour '{indicator_freq}' manquant ou vide.",
                     strategy_name=self.name
                 )
-                
-            # Vérifier les colonnes requises
-            required_cols = ['open_price', 'high_price', 'low_price', 'close_price', 'base_asset_volume']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                raise StrategyError(
-                    f"Missing required columns in {tf}: {missing_cols}",
-                    strategy_name=self.name
-                )
-                
-            # Vérifier le nombre minimum de périodes
-            if len(df) < self.min_required_periods:
-                raise StrategyError(
-                    f"Insufficient data for {tf}: {len(df)} < {self.min_required_periods}",
-                    strategy_name=self.name
-                )
-                
-    def _format_signals(
-        self,
-        signals_df: pd.DataFrame,
-        klines: Dict[str, pd.DataFrame],
-        current_position: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Formate les signaux au format standardisé.
-        
-        Args:
-            signals_df: DataFrame avec les signaux bruts
-            klines: Dict avec les klines originales
-            current_position: Position actuelle
+            return df
+        else:
+            raise StrategyError(f"Type de données non supporté: {type(data)}.", strategy_name=self.name)
             
-        Returns:
-            Liste de signaux formatés
-        """
+    @abstractmethod
+    def calculate_indicators(self, data: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"]) -> pd.DataFrame:
+        pass
+        
+    @abstractmethod
+    def generate_signals(self, indicators: pd.DataFrame) -> pd.DataFrame:
+        pass
+        
+    def execute(self, klines: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"], current_position: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        try:
+            indicators_df = self.calculate_indicators(klines)
+            if indicators_df is None or not isinstance(indicators_df, pd.DataFrame):
+                 raise StrategyError(f"calculate_indicators pour {self.name} n'a pas retourné un DataFrame valide.", strategy_name=self.name)
+            self._indicators_cache = indicators_df
+            signals_df = self.generate_signals(indicators_df)
+            self._signals_cache = signals_df
+            formatted_signals = self._format_signals(signals_df=signals_df, klines_data=klines, current_position=current_position)
+            return formatted_signals
+        except Exception as e:
+            logger.error(f"Erreur lors de l'exécution de la stratégie {self.name}: {e}", exc_info=True)
+            raise StrategyError(f"L'exécution de la stratégie a échoué: {e}", strategy_name=self.name, original_exception=e)
+            
+    def _format_signals(self, signals_df: pd.DataFrame, klines_data: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"], current_position: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         formatted_signals = []
+        execution_tf = Kline.INTERVAL_1MINUTE
         
-        # Obtenir le DataFrame principal (premier timeframe requis)
-        main_tf = self.required_timeframes[0]
-        main_df = klines[main_tf]
-        
-        # Ne garder que les signaux non-neutres récents
-        active_signals = signals_df[signals_df['signal'] != 0].tail(10)
+        main_df: pd.DataFrame
+        try:
+            if isinstance(klines_data, EnrichedDataFrame):
+                main_df = klines_data.get_view(execution_tf)
+            else:
+                main_df = klines_data.get(self.get_param('indicator_frequency'))
+                if main_df is None:
+                    raise StrategyError("Impossible de déterminer le DataFrame principal pour le formatage.")
+        except (ValueError, StrategyError) as e:
+            logger.warning(f"Impossible d'obtenir '{execution_tf}'. Repli sur la fréquence des indicateurs. Raison: {e}")
+            main_df = self._prepare_indicator_data(klines_data)
+
+        if DataFrameCols.SIGNAL.value not in signals_df.columns:
+            if 'entry_long' in signals_df.columns and 'entry_short' in signals_df.columns:
+                signals_df[DataFrameCols.SIGNAL.value] = 0
+                signals_df.loc[signals_df['entry_long'], DataFrameCols.SIGNAL.value] = 1
+                signals_df.loc[signals_df['entry_short'], DataFrameCols.SIGNAL.value] = -1
+            else:
+                logger.warning(f"'signal' manquant dans signals_df pour {self.name}.")
+                return []
+            
+        active_signals = signals_df[signals_df[DataFrameCols.SIGNAL.value] != 0].tail(10)
         
         for idx, row in active_signals.iterrows():
-            # Obtenir les prix actuels
-            if idx in main_df.index:
+            try:
                 current_bar = main_df.loc[idx]
-            else:
-                # Trouver la barre la plus proche
-                nearest_idx = main_df.index[main_df.index.get_indexer([idx], method='nearest')[0]]
-                current_bar = main_df.loc[nearest_idx]
-                
-            # Créer le signal formaté
+            except KeyError:
+                try:
+                    nearest_idx_pos = main_df.index.get_indexer([idx], method='nearest')[0]
+                    current_bar = main_df.iloc[nearest_idx_pos]
+                except (IndexError, KeyError):
+                    logger.warning(f"Index proche non trouvé pour {idx} dans {self.name}. Signal ignoré.")
+                    continue
+            
+            if DataFrameCols.CLOSE.value not in current_bar:
+                logger.error(f"'{DataFrameCols.CLOSE.value}' manquant. Impossible de déterminer le prix.")
+                continue
+
             signal = {
-                'timestamp': idx,
-                'strategy_name': self.name,
-                'strategy_version': self.version,
-                'signal_type': self._get_signal_type(row['signal']),
-                'side': Trading.SIDE_BUY if row['signal'] > 0 else Trading.SIDE_SELL,
-                'entry_price': row.get('entry_price', current_bar['close_price']),
-                'stop_loss': row.get('stop_loss'),
-                'take_profit': row.get('take_profit'),
-                'confidence': row.get('confidence', 0.5),
+                'timestamp': idx, 'strategy_name': self.name, 'strategy_version': self.version,
+                'signal_type': self._get_signal_type(row[DataFrameCols.SIGNAL.value]),
+                'side': Trading.SIDE_BUY if row[DataFrameCols.SIGNAL.value] > 0 else Trading.SIDE_SELL,
+                'entry_price': row.get(DataFrameCols.ENTRY_PRICE.value, current_bar[DataFrameCols.CLOSE.value]),
+                'stop_loss': row.get(DataFrameCols.STOP_LOSS.value),
+                'take_profit': row.get(DataFrameCols.TAKE_PROFIT.value),
+                'confidence': row.get(DataFrameCols.CONFIDENCE.value, 0.5),
                 'metadata': {
                     'indicators': self._get_signal_metadata(idx, row),
-                    'timeframe': main_tf,
+                    'indicator_timeframe': self.get_param('indicator_frequency'),
+                    'execution_timeframe': main_df.index.freqstr if hasattr(main_df.index, 'freqstr') else execution_tf,
                     'current_position': current_position
                 }
             }
-            
-            # Valider et ajuster les prix si nécessaire
             signal = self._validate_signal_prices(signal, current_bar)
-            
             formatted_signals.append(signal)
             
         return formatted_signals
         
     def _get_signal_type(self, signal_value: float) -> str:
-        """Convertit la valeur numérique du signal en type string."""
-        if signal_value > 0:
-            return Trading.SIGNAL_TYPE_LONG
-        elif signal_value < 0:
-            return Trading.SIGNAL_TYPE_SHORT
-        else:
-            return Trading.SIGNAL_TYPE_NEUTRAL
+        if signal_value > 0: return Trading.SIGNAL_TYPE_LONG
+        elif signal_value < 0: return Trading.SIGNAL_TYPE_SHORT
+        else: return Trading.SIGNAL_TYPE_NEUTRAL
             
-    def _get_signal_metadata(
-        self,
-        timestamp: pd.Timestamp,
-        signal_row: pd.Series
-    ) -> Dict[str, Any]:
-        """
-        Extrait les métadonnées pour un signal.
-        À surcharger dans les sous-classes pour ajouter des infos spécifiques.
-        """
+    def _get_signal_metadata(self, timestamp: pd.Timestamp, signal_row: pd.Series) -> Dict[str, Any]:
         metadata = {}
-        
-        # Ajouter les valeurs des indicateurs si disponibles
-        if hasattr(self, '_indicators_cache'):
-            for tf, indicators_df in self._indicators_cache.items():
-                if timestamp in indicators_df.index:
-                    tf_data = indicators_df.loc[timestamp].to_dict()
-                    metadata[f'indicators_{tf}'] = tf_data
-                    
+        if self._indicators_cache is not None and not self._indicators_cache.empty and timestamp in self._indicators_cache.index:
+            tf_data = self._indicators_cache.loc[timestamp].to_dict()
+            metadata['indicators'] = {k: v for k, v in tf_data.items() if pd.notna(v)}
         return metadata
         
-    def _validate_signal_prices(
-        self,
-        signal: Dict[str, Any],
-        current_bar: pd.Series
-    ) -> Dict[str, Any]:
-        """
-        Valide et ajuste les prix du signal si nécessaire.
-        
-        Args:
-            signal: Signal à valider
-            current_bar: Barre de prix actuelle
-            
-        Returns:
-            Signal avec prix validés
-        """
+    def _validate_signal_prices(self, signal: Dict[str, Any], current_bar: pd.Series) -> Dict[str, Any]:
         entry_price = signal['entry_price']
-        stop_loss = signal.get('stop_loss')
-        take_profit = signal.get('take_profit')
-        
-        # Pour un signal LONG
+        if not isinstance(entry_price, (int, float)) or np.isnan(entry_price):
+            logger.warning(f"Prix d'entrée invalide ({entry_price}). Utilisation du prix de clôture.")
+            entry_price = current_bar[DataFrameCols.CLOSE.value]
+            signal['entry_price'] = entry_price
+            if not isinstance(entry_price, (int, float)) or np.isnan(entry_price):
+                logger.error(f"Prix d'entrée de repli également invalide.")
+                return signal
+
+        def is_valid_price(p): return p is not None and isinstance(p, (int, float)) and not np.isnan(p)
+
+        sl, tp = signal.get('stop_loss'), signal.get('take_profit')
         if signal['signal_type'] == Trading.SIGNAL_TYPE_LONG:
-            # Le SL doit être sous le prix d'entrée
-            if stop_loss and stop_loss >= entry_price:
-                logger.warning(f"Invalid SL for LONG: {stop_loss} >= {entry_price}")
-                signal['stop_loss'] = entry_price * 0.98  # 2% par défaut
-                
-            # Le TP doit être au-dessus du prix d'entrée
-            if take_profit and take_profit <= entry_price:
-                logger.warning(f"Invalid TP for LONG: {take_profit} <= {entry_price}")
-                signal['take_profit'] = entry_price * 1.02  # 2% par défaut
-                
-        # Pour un signal SHORT
+            if is_valid_price(sl) and sl >= entry_price: signal['stop_loss'] = entry_price * 0.98
+            if is_valid_price(tp) and tp <= entry_price: signal['take_profit'] = entry_price * 1.02
         elif signal['signal_type'] == Trading.SIGNAL_TYPE_SHORT:
-            # Le SL doit être au-dessus du prix d'entrée
-            if stop_loss and stop_loss <= entry_price:
-                logger.warning(f"Invalid SL for SHORT: {stop_loss} <= {entry_price}")
-                signal['stop_loss'] = entry_price * 1.02  # 2% par défaut
-                
-            # Le TP doit être sous le prix d'entrée
-            if take_profit and take_profit >= entry_price:
-                logger.warning(f"Invalid TP for SHORT: {take_profit} >= {entry_price}")
-                signal['take_profit'] = entry_price * 0.98  # 2% par défaut
-                
+            if is_valid_price(sl) and sl <= entry_price: signal['stop_loss'] = entry_price * 1.02
+            if is_valid_price(tp) and tp >= entry_price: signal['take_profit'] = entry_price * 0.98
         return signal
         
     def get_required_lookback(self) -> int:
-        """
-        Retourne le nombre de périodes historiques requises.
-        
-        Returns:
-            Nombre de périodes
-        """
         return self.min_required_periods
         
     def get_info(self) -> Dict[str, Any]:
-        """
-        Retourne les informations sur la stratégie.
-        
-        Returns:
-            Dict avec les infos de la stratégie
-        """
         return {
-            'name': self.name,
-            'version': self.version,
-            'description': self.description,
-            'required_timeframes': self.required_timeframes,
-            'min_required_periods': self.min_required_periods,
-            'parameters': self.params,
-            'default_parameters': self.default_params
+            'name': self.name, 'version': self.version, 'description': self.description,
+            'required_timeframes': self.required_timeframes, 'min_required_periods': self.min_required_periods,
+            'parameters': self.params, 'default_parameters': self.default_params
         }
         
     def reset(self) -> None:
-        """Réinitialise les caches internes de la stratégie."""
-        self._indicators_cache.clear()
-        self._signals_cache = None
+        self._indicators_cache, self._signals_cache = None, None
         logger.debug(f"Reset strategy {self.name} caches")
         
     def __repr__(self) -> str:
-        """Représentation string de la stratégie."""
-        return f"{self.__class__.__name__}(name='{self.name}', version='{self.version}', params={self.params})"
+        return f"{self.__class__.__name__}(name='{self.name}', params={self.params})"

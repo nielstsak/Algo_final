@@ -423,16 +423,24 @@ class BinanceDataClient:
             # Validations logiques
             if high_price < low_price:
                 raise ValueError(f"High price {high_price} is less than low price {low_price}")
+            
+            current_prices_for_ohlc = [open_price, close_price]
+            # Only include high and low if they are not causing the issue initially
+            if high_price >= low_price:
+                current_prices_for_ohlc.extend([high_price, low_price])
+            else: # high < low, which is already an issue, use only open/close for range
+                logger.warning(f"Initial high {high_price} < low {low_price} for {symbol} at {open_time_ms}. OHLC will be based on O/C first.")
+
+
             # S'assurer que open/close sont dans les bornes high/low
-            if not (low_price <= open_price <= high_price and low_price <= close_price <= high_price):
-                # Ajuster high/low si open/close sont en dehors, ce qui peut arriver avec des données imparfaites
-                # ou des klines sans volume.
-                logger.warning(f"OHLC prices for {symbol} at {open_time_ms} are not strictly ordered: "
-                               f"O={open_price}, H={high_price}, L={low_price}, C={close_price}. Adjusting H/L.")
-                # Recalculer high et low pour englober open et close
-                current_prices = [open_price, high_price, low_price, close_price]
-                high_price = max(current_prices)
-                low_price = min(current_prices)
+            # Recalculer high et low pour englober open et close, et les valeurs initiales de H/L si valides
+            final_high_price = max(current_prices_for_ohlc)
+            final_low_price = min(current_prices_for_ohlc)
+
+            if not (final_low_price <= open_price <= final_high_price and final_low_price <= close_price <= final_high_price):
+                 logger.warning(f"OHLC prices for {symbol} at {open_time_ms} were not strictly ordered even after adjustment: "
+                               f"O={open_price}, H={high_price} (orig), L={low_price} (orig), C={close_price}. "
+                               f"Final H={final_high_price}, Final L={final_low_price}. Data might be unusual.")
 
 
             if base_volume < Decimal(0): # Le volume ne peut pas être négatif
@@ -442,19 +450,19 @@ class BinanceDataClient:
                 raise ValueError(f"Close time {close_time_ms} is before or same as open time {open_time_ms}")
 
             # Retourner un dictionnaire avec des types Python standards (float pour la plupart des usages)
+            # Les noms de clés ici sont ceux que DataManager s'attend à recevoir pour son renommage.
             return {
-                Kline.OHLCV_TIMESTAMP: open_time_ms, # Utiliser la constante pour le nom de la colonne timestamp
-                'open_time': open_time_ms, # Peut être redondant mais utile pour clarté
-                Kline.OHLCV_OPEN: float(open_price),
-                Kline.OHLCV_HIGH: float(high_price),
-                Kline.OHLCV_LOW: float(low_price),
-                Kline.OHLCV_CLOSE: float(close_price),
-                Kline.OHLCV_VOLUME: float(base_volume), # 'volume' réfère au volume de l'actif de base
+                'open_time': open_time_ms,
+                'open': float(final_low_price if open_price < final_low_price else (final_high_price if open_price > final_high_price else open_price)), # Clamped open
+                'high': float(final_high_price),
+                'low': float(final_low_price),
+                'close': float(final_low_price if close_price < final_low_price else (final_high_price if close_price > final_high_price else close_price)), # Clamped close
+                'volume': float(base_volume),
                 'close_time': close_time_ms,
-                Kline.OHLCV_QUOTE_ASSET_VOLUME: float(quote_volume),
-                Kline.OHLCV_NUMBER_OF_TRADES: num_trades,
-                Kline.OHLCV_TAKER_BUY_BASE_ASSET_VOLUME: float(taker_buy_base_volume),
-                Kline.OHLCV_TAKER_BUY_QUOTE_ASSET_VOLUME: float(taker_buy_quote_volume)
+                'quote_asset_volume': float(quote_volume),
+                'number_of_trades': num_trades,
+                'taker_buy_base_asset_volume': float(taker_buy_base_volume),
+                'taker_buy_quote_asset_volume': float(taker_buy_quote_volume)
             }
         except (ValueError, TypeError, IndexError) as e: # Attraper les erreurs de conversion ou d'index
             logger.error(f"Validation failed for kline data: {kline_raw} for symbol {symbol}. Error: {e}")
@@ -550,7 +558,7 @@ class BinanceDataClient:
         interval: str = Kline.INTERVAL_1MINUTE,
         start_time: Optional[int] = None, # Attendre un timestamp en millisecondes
         end_time: Optional[int] = None,   # Attendre un timestamp en millisecondes
-        progress_callback: Optional[Callable[[int, int], None]] = None # (klines_telechargees, klines_estimees_total)
+        progress_callback: Optional[Callable[[int, int, Optional[int]], None]] = None # (klines_telechargees_batch, klines_estimees_total_pour_paire, last_kline_ts_in_batch)
     ) -> List[Dict[str, Any]]:
         """
         Récupère un grand nombre de klines en effectuant plusieurs requêtes, gérant la pagination.
@@ -563,101 +571,110 @@ class BinanceDataClient:
             raise BinanceAPIError("Client not initialized. Call initialize() first.")
 
         # Définir les bornes temporelles si non fournies
+        current_time_ms = int(datetime.now().timestamp() * 1000)
         if end_time is None:
-            end_time = int(datetime.now().timestamp() * 1000) # Heure actuelle
+            end_time = current_time_ms # Heure actuelle
         if start_time is None: # Par défaut, récupérer les 30 derniers jours si start_time n'est pas fourni
             start_time = end_time - (30 * 24 * 60 * 60 * 1000) # 30 jours en millisecondes
+        
+        # S'assurer que start_time n'est pas dans le futur et end_time n'est pas avant start_time
+        if start_time >= end_time:
+            logger.warning(f"Start time {start_time} is after or equal to end time {end_time} for {symbol}. No klines will be fetched.")
+            return []
+        if start_time > current_time_ms : # Ne pas essayer de fetcher des données du futur
+            logger.warning(f"Start time {start_time} is in the future for {symbol}. Adjusting to current time.")
+            start_time = current_time_ms
+            if start_time >= end_time: return []
+
 
         all_klines: List[Dict[str, Any]] = []
         current_fetch_start_time = start_time
         interval_ms = self._get_interval_milliseconds(interval)
+        if interval_ms == 0: # Eviter division par zéro
+            raise ValueError(f"Interval {interval} resulted in 0 milliseconds duration.")
+            
         limit_per_request = System.MAX_KLINES_PER_BINANCE_REQUEST # Limite de klines par requête API
 
         # Estimer le nombre total de klines pour le callback de progression
-        total_estimated_klines = (end_time - start_time) // interval_ms if interval_ms > 0 else 0
-        if progress_callback:
-            progress_callback(0, total_estimated_klines) # Appel initial
+        total_estimated_klines_for_period = (end_time - start_time) // interval_ms
+        
+        # Variable pour suivre le total de klines téléchargées pour cette paire dans cette session de fetch_klines_batch
+        total_klines_downloaded_for_pair_session = 0
 
         logger.info(f"Starting batch kline download for {symbol} (interval: {interval}) "
                     f"from {datetime.fromtimestamp(start_time/1000)} to {datetime.fromtimestamp(end_time/1000)}."
-                    f" Estimated klines: {total_estimated_klines if total_estimated_klines > 0 else 'N/A'}")
+                    f" Estimated klines for period: {total_estimated_klines_for_period if total_estimated_klines_for_period > 0 else 'N/A'}")
 
         while current_fetch_start_time < end_time:
             try:
-                # Calculer le end_time pour ce batch spécifique pour ne pas dépasser end_time global
-                # et pour ne pas demander une période couvrant plus que limit_per_request klines.
-                # L'API Binance prend startTime (inclusif) et endTime (inclusif).
-                batch_potential_end_time = current_fetch_start_time + (limit_per_request * interval_ms) - interval_ms # Fin de la dernière kline possible
-                # S'assurer que endTime du batch ne dépasse pas le endTime global.
-                # Et que endTime n'est pas avant startTime (ce qui peut arriver si interval_ms est grand)
-                current_batch_end_time = min(batch_potential_end_time, end_time -1) # -1 car endTime est inclusif
+                batch_potential_end_time = current_fetch_start_time + (limit_per_request * interval_ms) - interval_ms 
+                current_batch_end_time = min(batch_potential_end_time, end_time -1) 
 
-                # Si le début calculé est déjà après la fin du batch, ou si l'intervalle est trop grand
                 if current_fetch_start_time > current_batch_end_time :
-                     logger.debug(f"Calculated current_fetch_start_time ({current_fetch_start_time}) "
-                                  f"is > current_batch_end_time ({current_batch_end_time}). Ending batch download.")
+                     logger.debug(f"Calculated current_fetch_start_time ({datetime.fromtimestamp(current_fetch_start_time/1000)}) "
+                                  f"is > current_batch_end_time ({datetime.fromtimestamp(current_batch_end_time/1000)}). Ending batch download.")
                      break
 
-                klines_batch = await self.fetch_klines(
+                klines_in_current_api_call = await self.fetch_klines(
                     symbol=symbol,
                     interval=interval,
                     start_time=current_fetch_start_time,
-                    end_time=current_batch_end_time, # Passer le endTime calculé pour ce batch
+                    end_time=current_batch_end_time, 
                     limit=limit_per_request
                 )
 
-                if not klines_batch: # Si aucune kline n'est retournée, on a atteint la fin des données disponibles
+                if not klines_in_current_api_call: 
                     logger.info(f"No more klines returned for {symbol} starting {datetime.fromtimestamp(current_fetch_start_time/1000)}. "
                                 f"Batch download likely complete for this period.")
                     break
-
+                
                 # Filtrer pour s'assurer que les klines sont dans la plage [start_time, end_time)
                 # et éviter les doublons si les API se chevauchent légèrement.
-                new_klines_in_batch = [k for k in klines_batch if k['open_time'] < end_time]
+                # La déduplication finale gérera les doublons plus robustement.
+                new_klines_to_add_this_batch = [k for k in klines_in_current_api_call if k['open_time'] < end_time]
 
-                if not all_klines: # Premier batch
-                     all_klines.extend(new_klines_in_batch)
-                elif new_klines_in_batch : # Éviter les doublons avec le batch précédent
-                    last_stored_open_time = all_klines[-1]['open_time']
-                    all_klines.extend([k for k in new_klines_in_batch if k['open_time'] > last_stored_open_time])
 
-                if progress_callback: # Mettre à jour la progression
-                    progress_callback(len(all_klines), total_estimated_klines)
+                if new_klines_to_add_this_batch:
+                    all_klines.extend(new_klines_to_add_this_batch)
+                    total_klines_downloaded_for_pair_session += len(new_klines_to_add_this_batch)
+                    
+                    last_kline_ts_in_batch = new_klines_to_add_this_batch[-1]['open_time']
+
+                    if progress_callback: 
+                        # Le callback attend (klines_telechargees_CE_BATCH, klines_estimees_TOTAL_POUR_PAIRE, last_kline_ts_in_batch)
+                        # Ici, on fournit le nombre de klines dans ce batch spécifique, et l'estimation totale pour la période demandée.
+                        progress_callback(len(new_klines_to_add_this_batch), total_estimated_klines_for_period, last_kline_ts_in_batch)
+                else: # No new klines to add, probably means we fetched beyond end_time or got empty list
+                    if progress_callback: # Informer qu'aucun kline n'a été ajouté dans ce batch
+                         progress_callback(0, total_estimated_klines_for_period, None)
+
 
                 # Mettre à jour current_fetch_start_time pour la prochaine itération.
-                # Utiliser le close_time de la dernière kline récupérée + 1ms pour éviter de la redemander.
-                # Ou open_time de la dernière kline + interval_ms.
-                # close_time + 1 est plus sûr pour éviter les manques si l'intervalle n'est pas parfaitement aligné.
-                last_kline_close_time_ms = klines_batch[-1]['close_time']
-                next_start_time = last_kline_close_time_ms + 1 # +1 milliseconde
+                last_processed_kline_close_time_ms = klines_in_current_api_call[-1]['close_time']
+                next_start_time = last_processed_kline_close_time_ms + 1
 
-                # Vérifier la progression pour éviter une boucle infinie
                 if next_start_time <= current_fetch_start_time :
                     logger.warning(f"No progress in kline batch download for {symbol}. "
-                                   f"Last kline time: {datetime.fromtimestamp(klines_batch[-1]['open_time']/1000)}. Breaking loop.")
+                                   f"Last kline time: {datetime.fromtimestamp(klines_in_current_api_call[-1]['open_time']/1000)}. Breaking loop.")
                     break
                 current_fetch_start_time = next_start_time
 
-                # Si le nombre de klines retourné est inférieur à la limite demandée,
-                # on a probablement atteint la fin des données disponibles pour cette période.
-                if len(klines_batch) < limit_per_request:
-                    logger.info(f"Batch for {symbol} returned {len(klines_batch)} klines (less than limit {limit_per_request}), "
+                if len(klines_in_current_api_call) < limit_per_request:
+                    logger.info(f"Batch for {symbol} returned {len(klines_in_current_api_call)} klines (less than limit {limit_per_request}), "
                                 f"assuming end of available data for the period.")
                     break
 
-                await asyncio.sleep(0.1) # Petite pause entre les requêtes de lot pour être courtois avec l'API
+                await asyncio.sleep(0.1) 
 
-            except BinanceInvalidSymbolError as e: # Si le symbole devient invalide en cours de route (rare)
+            except BinanceInvalidSymbolError as e: 
                 logger.error(f"Invalid symbol {symbol} encountered during batch kline fetch: {e}")
-                raise # Relancer pour interrompre le processus pour ce symbole
-            except BinanceRateLimitError as e: # Devrait être géré par le RateLimiter, mais comme sécurité
-                logger.error(f"Rate limit hit during batch kline fetch for {symbol}: {e}. "
-                               f"This is unexpected if RateLimiter is working correctly.")
-                raise # Relancer, car cela indique un problème
-            except Exception as e: # Gérer d'autres erreurs potentielles
+                raise 
+            except BinanceRateLimitError as e: 
+                logger.error(f"Rate limit hit during batch kline fetch for {symbol}: {e}. ")
+                raise 
+            except Exception as e: 
                 logger.error(f"Error during kline batch download for {symbol} "
-                               f"at start_time {datetime.fromtimestamp(current_fetch_start_time/1000)}: {e}")
-                # Lever une exception personnalisée pour indiquer l'échec du téléchargement du lot
+                               f"at start_time {datetime.fromtimestamp(current_fetch_start_time/1000)}: {e}", exc_info=True)
                 raise DataDownloadError(
                     message=f"Failed to download kline batch for {symbol}",
                     source="Binance",
@@ -665,15 +682,19 @@ class BinanceDataClient:
                     original_exception=e
                 )
 
-        # Optionnel: déduplication finale au cas où il y aurait des chevauchements exacts non filtrés
+        # Déduplication finale
         if all_klines:
-            # Utiliser pandas pour une déduplication facile basée sur 'open_time'
-            # Cela garantit que chaque kline (identifiée par son open_time) est unique.
             try:
-                unique_klines_df = pd.DataFrame(all_klines).drop_duplicates(subset=['open_time'], keep='first')
-                all_klines = unique_klines_df.sort_values(by='open_time').to_dict('records')
+                # Convertir en DataFrame pour une déduplication et un tri faciles
+                df_temp = pd.DataFrame(all_klines)
+                # S'assurer que 'open_time' est unique, en gardant la première occurrence
+                df_temp.drop_duplicates(subset=['open_time'], keep='first', inplace=True)
+                # Trier par 'open_time' pour s'assurer de l'ordre chronologique
+                df_temp.sort_values(by='open_time', inplace=True)
+                # Reconvertir en liste de dictionnaires
+                all_klines = df_temp.to_dict('records')
             except Exception as e_df:
-                logger.error(f"Error during final deduplication of klines for {symbol}: {e_df}. Proceeding with potentially duplicated data.")
+                logger.error(f"Error during final deduplication/sorting of klines for {symbol}: {e_df}. Proceeding with potentially non-unique or unsorted data.")
 
 
         logger.success(f"Completed batch kline download for {symbol}. Total unique klines fetched: {len(all_klines)}")
@@ -777,9 +798,12 @@ async def example_usage():
                 end_time_ms = int(datetime.now().timestamp() * 1000)
                 start_time_ms = end_time_ms - (1 * 60 * 60 * 1000)  # Les 60 dernières minutes
 
-                def progress_update(downloaded_count, total_expected):
-                    percentage = (downloaded_count / total_expected * 100) if total_expected > 0 else 0
-                    print(f"  Batch Progress: {downloaded_count} / {total_expected} klines ({percentage:.1f}%)")
+                def progress_update(klines_in_batch, total_expected_for_pair, last_ts): # Adapté aux nouveaux params
+                    percentage = (klines_in_batch / total_expected_for_pair * 100) if total_expected_for_pair > 0 and klines_in_batch <= total_expected_for_pair else 0 # Approximation
+                    # Note: klines_in_batch est pour le batch actuel, total_expected_for_pair est pour toute la période.
+                    # Un meilleur suivi de la progression globale nécessiterait de cumuler klines_in_batch.
+                    print(f"  Batch Progress: Received {klines_in_batch} klines. (Total Period Est: {total_expected_for_pair}) Last TS in batch: {last_ts}")
+
 
                 historical_klines = await client.fetch_klines_batch(
                     symbol=target_symbol_batch,

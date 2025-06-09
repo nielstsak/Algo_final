@@ -10,17 +10,22 @@ from src.core.constants import Kline
 
 class BaseStorage(ABC):
     """
-    Interface abstraite pour les systèmes de stockage de klines.
+    Interface abstraite définissant le contrat pour les systèmes de stockage.
+    Toute classe de stockage (ex: Parquet, PostgreSQL) doit hériter de BaseStorage
+    et implémenter toutes ses méthodes abstraites.
     """
     
     @abstractmethod
     async def initialize(self) -> None:
-        """Initialise le système de stockage."""
+        """
+        Initialise le système de stockage, comme la création de répertoires
+        ou l'établissement de connexions à la base de données.
+        """
         pass
         
     @abstractmethod
     async def close(self) -> None:
-        """Ferme proprement les connexions."""
+        """Ferme proprement les connexions et libère les ressources."""
         pass
         
     @abstractmethod
@@ -31,12 +36,12 @@ class BaseStorage(ABC):
         interval: str = Kline.INTERVAL_1MINUTE
     ) -> None:
         """
-        Stocke les klines dans le système de stockage.
+        Stocke un DataFrame de klines.
         
         Args:
-            df: DataFrame contenant les klines
-            pair: Paire de trading
-            interval: Intervalle des klines
+            df: DataFrame contenant les données klines à stocker.
+            pair: La paire de trading (ex: "BTCUSDT").
+            interval: L'intervalle des klines (ex: "1m").
         """
         pass
         
@@ -50,27 +55,27 @@ class BaseStorage(ABC):
         limit: Optional[int] = None
     ) -> Optional[pd.DataFrame]:
         """
-        Récupère les klines depuis le stockage.
+        Récupère les klines depuis le système de stockage.
         
         Args:
-            pair: Paire de trading
-            interval: Intervalle des klines
-            start_time: Date de début (incluse)
-            end_time: Date de fin (incluse)
-            limit: Nombre maximum de klines à retourner
+            pair: La paire de trading.
+            interval: L'intervalle des klines.
+            start_time: Date de début (inclusive, UTC).
+            end_time: Date de fin (inclusive, UTC).
+            limit: Nombre maximum de klines à retourner depuis la fin de la période.
             
         Returns:
-            DataFrame avec les klines ou None si aucune donnée
+            Un DataFrame contenant les klines, ou None si aucune donnée n'est trouvée.
         """
         pass
         
     @abstractmethod
     async def get_available_pairs(self) -> List[str]:
         """
-        Retourne la liste des paires disponibles dans le stockage.
+        Retourne la liste unique et triée des paires de trading disponibles dans le stockage.
         
         Returns:
-            Liste des paires
+            Une liste de strings représentant les paires.
         """
         pass
         
@@ -81,14 +86,14 @@ class BaseStorage(ABC):
         interval: str = Kline.INTERVAL_1MINUTE
     ) -> Optional[Tuple[datetime, datetime]]:
         """
-        Retourne la plage de dates disponible pour une paire.
+        Retourne la plage de dates (premier et dernier timestamp) disponible pour une paire et un intervalle.
         
         Args:
-            pair: Paire de trading
-            interval: Intervalle des klines
+            pair: La paire de trading.
+            interval: L'intervalle des klines.
             
         Returns:
-            Tuple (start_date, end_date) ou None si aucune donnée
+            Un tuple (start_date, end_date) en UTC, ou None si aucune donnée n'est trouvée.
         """
         pass
         
@@ -98,39 +103,37 @@ class BaseStorage(ABC):
         cutoff_date: datetime
     ) -> Dict[str, int]:
         """
-        Supprime les données antérieures à une date donnée.
+        Supprime toutes les données antérieures à une date de coupure spécifiée.
         
         Args:
-            cutoff_date: Date limite (les données avant cette date sont supprimées)
+            cutoff_date: La date limite (UTC). Les données avant cette date seront supprimées.
             
         Returns:
-            Dictionnaire {pair: nombre_de_lignes_supprimées}
+            Un dictionnaire résumant le nombre de lignes supprimées par table/paire.
         """
         pass
         
+    @abstractmethod
     async def get_statistics(self, pair: str, interval: str = Kline.INTERVAL_1MINUTE) -> Dict[str, Any]:
         """
-        Retourne des statistiques sur les données stockées pour une paire.
+        Calcule et retourne des statistiques de base sur les données stockées pour une paire.
         
         Args:
-            pair: Paire de trading
-            interval: Intervalle des klines
+            pair: La paire de trading.
+            interval: L'intervalle des klines.
             
         Returns:
-            Dictionnaire avec les statistiques
+            Un dictionnaire de statistiques (ex: nombre de lignes, dates, etc.).
         """
-        data_range = await self.get_data_range(pair, interval)
-        if not data_range:
-            return {"exists": False}
-            
-        df = await self.get_klines(pair, interval, limit=1)
-        if df is None or df.empty:
-            return {"exists": False}
-            
-        return {
-            "exists": True,
-            "start_date": data_range[0],
-            "end_date": data_range[1],
-            "duration_days": (data_range[1] - data_range[0]).days,
-            "sample_count": len(df) if df is not None else 0
-        }
+        pass
+
+    @abstractmethod
+    async def optimize_storage(self) -> Dict[str, Any]:
+        """
+        Effectue des opérations de maintenance pour optimiser le stockage,
+        comme la fusion de petits fichiers ou le VACUUM d'une table de base de données.
+
+        Returns:
+            Un dictionnaire résumant les résultats de l'optimisation.
+        """
+        pass

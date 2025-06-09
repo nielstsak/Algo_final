@@ -18,6 +18,7 @@ except ImportError:
         # Définition factice minimale pour éviter les erreurs d'import globales si tout échoue
         from abc import ABC, abstractmethod
         class BaseStrategy(ABC): # type: ignore
+            name: str = "DummyStrategyTemplate" # Added name for consistency
             def __init__(self, params: dict, **kwargs): self.params = params
             @abstractmethod
             def validate_params(self) -> None: raise NotImplementedError
@@ -113,13 +114,11 @@ class StrategyTemplate(BaseStrategy):
             **kwargs: Arguments supplémentaires passés à la BaseStrategy (ex: pair_symbol).
         """
         self.pair_symbol = kwargs.get('pair_symbol', 'DEFAULT_PAIR') 
-
-        super().__init__(params, **kwargs) 
-
+        # Définir strategy_name_log_prefix AVANT super().__init__
         self.strategy_name_log_prefix = f"[{self.name}][{self.pair_symbol}]" 
 
-        self.validate_params()
-
+        super().__init__(params, **kwargs) 
+        # self.validate_params() # Redondant, BaseStrategy.__init__ appelle validate_params
 
         self._signals: Optional[pd.DataFrame] = None 
 
@@ -128,13 +127,15 @@ class StrategyTemplate(BaseStrategy):
     def validate_params(self) -> None:
         """
         Valide les paramètres de la stratégie.
-        Cette méthode est appelée automatiquement par `__init__`.
+        Cette méthode est appelée automatiquement par `BaseStrategy.__init__`.
         Doit lever `InvalidStrategyParamsError` si un paramètre est invalide.
         """
-        logger.debug(f"{self.strategy_name_log_prefix} Validation des paramètres...")
+        # Utilisation de self.strategy_name_log_prefix ici est maintenant sécurisée
+        log_pref = getattr(self, 'strategy_name_log_prefix', f"[{self.name}][{self.pair_symbol}]_PreInit")
+        logger.debug(f"{log_pref} Validation des paramètres...")
+        
         param1 = self.get_param("param_exemple_1")
         if param1 is None or not isinstance(param1, int) or param1 <= 0:
-            # Correction: Passer 'message' explicitement
             raise InvalidStrategyParamsError(
                 message=f"Le paramètre 'param_exemple_1' doit être un entier positif. Reçu: {param1}",
                 strategy_name=self.name, 
@@ -143,14 +144,13 @@ class StrategyTemplate(BaseStrategy):
             )
 
         if self.get_param('sl_atr_mult') <= 0 or self.get_param('tp_atr_mult') <= 0:
-            # Correction: Passer 'message' explicitement
             raise InvalidStrategyParamsError(
                 message="Les multiplicateurs SL/TP ATR doivent être positifs.",
                 strategy_name=self.name, 
                 parameter_name='sl_atr_mult/tp_atr_mult', 
                 details="Doivent être positifs." 
             )
-        logger.info(f"{self.strategy_name_log_prefix} Paramètres validés.")
+        logger.info(f"{log_pref} Paramètres validés.")
 
     def calculate_indicators(self, klines: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         """
@@ -172,7 +172,6 @@ class StrategyTemplate(BaseStrategy):
         # indicator_tf = self.get_param("indicateur_frequence") # Non utilisé directement ici si les indicateurs sont pré-calculés
         main_tf_raw = self.required_timeframes[0] 
         if main_tf_raw not in klines or klines[main_tf_raw] is None:
-            # Correction: Passer 'message' explicitement pour StrategyError si sa version dummy est utilisée
             raise StrategyError(message=f"{log_pref} DataFrame pour '{main_tf_raw}' non fourni.", strategy_name=self.name)
         
         df_indicators = klines[main_tf_raw].copy()
@@ -292,4 +291,3 @@ class StrategyTemplate(BaseStrategy):
 
         logger.debug(f"{log_pref} Aucune action d'ordre générée pour le live trading sur la dernière kline.")
         return None
-

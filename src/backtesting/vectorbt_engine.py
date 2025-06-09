@@ -8,28 +8,29 @@ from loguru import logger
 import warnings
 
 from src.core.config import settings
-from src.core.constants import Trading, Kline # Assuming Kline might be used for freq defaults
+from src.core.constants import Trading, Kline
 from src.core.exceptions import BacktestError, BacktestSetupError
+from src.data.enriched_dataframe import EnrichedDataFrame
 from src.backtesting.signal_adapter import SignalAdapter
-from src.backtesting.fee_calculator import BinanceFeeCalculator # Or your base FeeCalculator
-# MODIFICATION ICI: Ajout de SlippageModel à l'import
-from src.backtesting.slippage_model import SlippageModel, FixedSlippageModel, VolumeBasedSlippageModel 
+from src.backtesting.fee_calculator import BinanceFeeCalculator
+from src.backtesting.slippage_model import SlippageModel, FixedSlippageModel, VolumeBasedSlippageModel
 
 class VectorBTEngine:
     """
     Moteur de backtesting utilisant VectorBT.
     Gère l'exécution des backtests avec support pour les frais, le slippage,
     et les paramètres réalistes de trading.
+    Adapté pour utiliser un EnrichedDataFrame pour les backtests multi-fréquences.
     """
     
     def __init__(
         self,
         initial_capital: float = 10000.0,
-        commission: Optional[float] = None, # Fixed commission rate from CLI
-        slippage: Optional[float] = None,   # Fixed slippage rate from CLI
+        commission: Optional[float] = None,
+        slippage: Optional[float] = None,
         leverage: float = 1.0,
         margin_mode: str = "cross",
-        freq: Optional[str] = None, # e.g., '1h', '1d'. VectorBT will parse this.
+        freq: Optional[str] = "1m",
         trade_on_close: bool = False,
         allow_shorting: bool = True,
         size_type: str = 'percent',
@@ -38,7 +39,7 @@ class VectorBTEngine:
         self.initial_capital = initial_capital
         self.leverage = leverage
         self.margin_mode = margin_mode
-        self.freq = freq 
+        self.freq = freq
         self.trade_on_close = trade_on_close
         self.allow_shorting = allow_shorting
         self.size_type = size_type
@@ -48,15 +49,14 @@ class VectorBTEngine:
         self.fixed_slippage_rate_from_cli = slippage
 
         if self.fixed_commission_rate_from_cli is None:
-            self.fee_calculator_instance: Optional[BinanceFeeCalculator] = BinanceFeeCalculator() 
+            self.fee_calculator_instance: Optional[BinanceFeeCalculator] = BinanceFeeCalculator()
             logger.info("Using dynamic BinanceFeeCalculator.")
         else:
             self.fee_calculator_instance = None
             logger.info(f"Using fixed commission rate from CLI: {self.fixed_commission_rate_from_cli*100:.4f}%")
 
         if self.fixed_slippage_rate_from_cli is None:
-            # Type hint pour l'instance du modèle de slippage
-            self.slippage_model_instance: Optional[SlippageModel] = FixedSlippageModel() 
+            self.slippage_model_instance: Optional[SlippageModel] = FixedSlippageModel()
             logger.info(f"Using dynamic {type(self.slippage_model_instance).__name__}.")
         else:
             self.slippage_model_instance = None
@@ -69,82 +69,40 @@ class VectorBTEngine:
         
         logger.info(
             f"VectorBTEngine initialized: capital={initial_capital}, "
-            f"leverage={leverage}, margin_mode={margin_mode}, freq='{self.freq}'"
+            f"leverage={leverage}, margin_mode={margin_mode}, execution_freq='{self.freq}'"
         )
         
-    def _calculate_fees(
-        self,
-        data: pd.DataFrame, 
-        symbol: str
-    ) -> Union[float, pd.Series]:
+    def _calculate_fees(self, data: pd.DataFrame, symbol: str) -> Union[float, pd.Series]:
         if self.fixed_commission_rate_from_cli is not None:
             return self.fixed_commission_rate_from_cli
-        
         if self.fee_calculator_instance:
-            is_maker = not self.trade_on_close 
+            is_maker = not self.trade_on_close
             return self.fee_calculator_instance.calculate_fees(data, symbol, is_maker=is_maker)
-        
-        logger.warning("No fee model or fixed rate defined, defaulting to 0.1% fees.")
         return 0.001
 
-    def _calculate_slippage(
-        self,
-        data: pd.DataFrame, 
-        symbol: str
-    ) -> Union[float, pd.Series]:
+    def _calculate_slippage(self, data: pd.DataFrame, symbol: str) -> Union[float, pd.Series]:
         if self.fixed_slippage_rate_from_cli is not None:
             return self.fixed_slippage_rate_from_cli
-            
         if self.slippage_model_instance:
-            return self.slippage_model_instance.calculate_slippage(
-                data, 
-                symbol, 
-                trade_on_close=self.trade_on_close
-            )
-
-        logger.warning("No slippage model or fixed rate defined, defaulting to 0.01% slippage.")
+            return self.slippage_model_instance.calculate_slippage(data, symbol, trade_on_close=self.trade_on_close)
         return 0.0001
 
-    def _validate_inputs(self, data: pd.DataFrame, signals: pd.DataFrame):
-        if not isinstance(data, pd.DataFrame) or data.empty:
-            raise BacktestSetupError("Data must be a non-empty pandas DataFrame.")
-        if not isinstance(signals, pd.DataFrame) or signals.empty:
-            # Allow empty signals if data is also empty (e.g. no data for period)
-            if not data.empty:
-                 raise BacktestSetupError("Signals must be a non-empty pandas DataFrame if data is present.")
-            else: # Both empty, this is okay, backtest will be trivial
-                logger.info("Data and signals are both empty. Backtest will be trivial.")
-                return
+    def _validate_inputs(self, data: Union[pd.DataFrame, EnrichedDataFrame], signals: pd.DataFrame):
+        if isinstance(data, EnrichedDataFrame):
+            if data.df.empty:
+                raise BacktestSetupError("EnrichedDataFrame is empty.")
+        elif isinstance(data, pd.DataFrame):
+            if data.empty:
+                raise BacktestSetupError("Input DataFrame is empty.")
+            required_data_cols = ['open', 'high', 'low', 'close']
+            if not all(col in data.columns for col in required_data_cols):
+                raise BacktestSetupError(f"Missing required OHLC columns in DataFrame. Found: {list(data.columns)}")
+        else:
+            raise BacktestSetupError("Data must be a pandas DataFrame or EnrichedDataFrame.")
 
+        if signals.empty and not (isinstance(data, EnrichedDataFrame) and data.df.empty):
+             raise BacktestSetupError("Signals DataFrame is empty while data is not.")
 
-        required_data_cols = ['open', 'high', 'low', 'close'] 
-        missing_cols = [col for col in required_data_cols if col not in data.columns]
-        if missing_cols:
-            raise BacktestSetupError(f"Missing required columns in data: {missing_cols}. Expected lowercase OHLC.")
-            
-        if not data.index.equals(signals.index) and not (data.empty or signals.empty):
-            logger.warning("Data and signals indices do not match perfectly. Attempting to align signals to data index.")
-            try:
-                # Prioritize data index, reindex signals, ffill for entries/exits, specific fill for others
-                original_signal_columns = signals.columns.tolist()
-                signals = signals.reindex(data.index)
-                for col in original_signal_columns:
-                    if 'entry' in col or 'exit' in col: # Boolean signals
-                        signals[col] = signals[col].fillna(False)
-                    # For 'sl', 'tp', 'size', NaN is often appropriate if no signal at that point
-                    # Default reindex behavior (NaN fill) is usually fine for these numeric/optional columns
-                logger.info("Successfully reindexed signals to match data index.")
-            except Exception as e:
-                raise BacktestSetupError(f"Failed to align signals index with data index: {e}")
-
-
-        for col in ['entries', 'exits', 'short_entries', 'short_exits']:
-            if col in signals.columns and signals[col].notna().any() and not pd.api.types.is_bool_dtype(signals[col]):
-                logger.warning(f"Signal column '{col}' is not boolean. Attempting to convert.")
-                try:
-                    signals[col] = signals[col].astype(bool)
-                except Exception as e:
-                    raise BacktestSetupError(f"Failed to convert signal column '{col}' to boolean: {e}")
 
     def _prepare_portfolio_params(
         self,
@@ -161,69 +119,92 @@ class VectorBTEngine:
         **kwargs
     ) -> Dict[str, Any]:
         params = {
-            'close': data['close'], 
-            'open': data['open'],   
-            'high': data['high'],   
-            'low': data['low'],     
-            'entries': entries,
-            'exits': exits,
-            'short_entries': short_entries,
-            'short_exits': short_exits,
-            'size': size if size is not None else self.default_size, 
-            'size_type': self.size_type, 
-            'fees': fees,
-            'slippage': slippage,
-            'init_cash': self.initial_capital,
-            'freq': self.freq, 
-            'direction': 'both' if self.allow_shorting else 'longonly',
-            'accumulate': False, 
-            'sl_stop': sl_stop, 
-            'tp_stop': tp_stop, 
-            'trade_on_close': self.trade_on_close, 
-            'call_seq': 'slbtp' if (sl_stop is not None or tp_stop is not None) else 'default',
+            'close': data['close'], 'open': data['open'], 'high': data['high'], 'low': data['low'],     
+            'entries': entries, 'exits': exits, 'short_entries': short_entries, 'short_exits': short_exits,
+            'size': size if size is not None else self.default_size, 'size_type': self.size_type, 
+            'fees': fees, 'slippage': slippage, 'init_cash': self.initial_capital, 'freq': self.freq, 
+            'direction': 'both' if self.allow_shorting else 'longonly', 'accumulate': False, 
+            'sl_stop': sl_stop, 'tp_stop': tp_stop, 
         }
-        
         params.update(kwargs)
-        # More selective logging for large series
-        loggable_params = {}
-        for k, v_item in params.items(): # Renamed v to v_item
-            if isinstance(v_item, (pd.Series, pd.DataFrame)) and len(v_item) > 10:
-                loggable_params[k] = f"{type(v_item).__name__}(len={len(v_item)})"
-            elif isinstance(v_item, (pd.Series, pd.DataFrame)): # Short series
-                 loggable_params[k] = f"{type(v_item).__name__}({v_item.to_dict() if isinstance(v_item, pd.Series) else 'DataFrame'})"
-            else:
-                loggable_params[k] = v_item
-        logger.debug(f"Portfolio.from_signals params: {loggable_params}")
         return params
 
     def run_backtest(
         self,
-        data: pd.DataFrame, 
+        data: Union[pd.DataFrame, EnrichedDataFrame], 
         signals: pd.DataFrame, 
         symbol: str,
         **kwargs 
     ) -> vbt.Portfolio:
         try:
-            self._validate_inputs(data, signals) # signals might be modified here if reindexed
+            self._validate_inputs(data, signals)
             
-            entries = signals.get('entries', pd.Series(False, index=data.index))
-            exits = signals.get('exits', pd.Series(False, index=data.index))
-            
-            short_entries = signals.get('short_entries', None) if self.allow_shorting else None
-            short_exits = signals.get('short_exits', None) if self.allow_shorting else None
-            
-            size_input_for_vbt = signals.get('size', None) 
+            if isinstance(data, EnrichedDataFrame):
+                exec_data = data.get_view('1m')
+                self.freq = '1m'
+                logger.info(f"Running backtest with EnrichedDataFrame. Execution data extracted for '1m' frequency.")
+                
+                signals_propagated = signals.reindex(exec_data.index)
+                bool_cols = ['entry_long', 'exit_long', 'entry_short', 'exit_short']
+                for col in bool_cols:
+                    if col in signals_propagated.columns:
+                        signals_propagated[col] = signals_propagated[col].fillna(False).astype(bool)
+                
+                for col in ['sl', 'tp', 'size']:
+                     if col in signals_propagated.columns:
+                         signals_propagated[col] = signals_propagated[col].ffill()
 
-            sl_stop_values = signals.get('sl', None) 
-            tp_stop_values = signals.get('tp', None)
+                logger.info(f"Signals (freq: {signals.index.freqstr if hasattr(signals.index, 'freqstr') else 'inferred'}) propagated to 1m frequency as single pulses.")
 
-            fees_rate = self._calculate_fees(data, symbol)
-            slippage_rate = self._calculate_slippage(data, symbol)
+            else:
+                exec_data = data
+                signals_propagated = signals
+                logger.info("Running backtest with standard DataFrame.")
+
+            entries = signals_propagated.get('entry_long', pd.Series(False, index=exec_data.index)).copy()
+            exits = signals_propagated.get('exit_long', pd.Series(False, index=exec_data.index)).copy()
+            short_entries = signals_propagated.get('entry_short', pd.Series(False, index=exec_data.index)).copy() if self.allow_shorting else pd.Series(False, index=exec_data.index)
+            short_exits = signals_propagated.get('exit_short', pd.Series(False, index=exec_data.index)).copy() if self.allow_shorting else pd.Series(False, index=exec_data.index)
+
+            if self.allow_shorting and self.size_type == 'percent':
+                logger.debug("Nettoyage des signaux pour éviter les renversements de position non supportés...")
+                
+                # Étape 1: Identifier les signaux qui feraient un renversement direct de position
+                # Un renversement serait: sortie long + entrée short sur la même bougie, ou sortie short + entrée long
+                long_to_short_reversal = exits & short_entries
+                short_to_long_reversal = short_exits & entries
+                
+                # Étape 2: Modifier les signaux pour éviter les renversements
+                # Pour les renversements, nous allons d'abord fermer la position, puis entrer
+                # dans la nouvelle position à la bougie suivante
+                
+                # Désactiver les entrées inverses sur les bougies de sortie
+                short_entries.loc[long_to_short_reversal] = False
+                entries.loc[short_to_long_reversal] = False
+                
+                # Reporter ces entrées à la bougie suivante
+                postponed_short_entries = long_to_short_reversal.shift(1).fillna(False).infer_objects(copy=False)
+                postponed_long_entries = short_to_long_reversal.shift(1).fillna(False).infer_objects(copy=False)
+                
+                # Ajouter les entrées reportées
+                short_entries = short_entries | postponed_short_entries
+                entries = entries | postponed_long_entries
+                
+                # Assurer qu'il n'y a pas de conflits entre entrées/sorties de même direction
+                entries = entries & ~exits
+                short_entries = short_entries & ~short_exits
+            
+            size_input = signals_propagated.get('size', None) 
+            sl_stop = signals_propagated.get('sl', None) 
+            tp_stop = signals_propagated.get('tp', None)
+
+            fees_rate = self._calculate_fees(exec_data, symbol)
+            slippage_rate = self._calculate_slippage(exec_data, symbol)
             
             portfolio_params = self._prepare_portfolio_params(
-                data, entries, exits, size_input_for_vbt, fees_rate, slippage_rate,
+                exec_data, entries, exits, size_input, fees_rate, slippage_rate,
                 short_entries=short_entries, short_exits=short_exits,
-                sl_stop=sl_stop_values, tp_stop=tp_stop_values,
+                sl_stop=sl_stop, tp_stop=tp_stop,
                 **kwargs
             )
             
@@ -232,10 +213,6 @@ class VectorBTEngine:
                 portfolio = vbt.Portfolio.from_signals(**portfolio_params)
             
             self._last_portfolio = portfolio
-            if portfolio.trades.count() > 0:
-                self._last_stats = portfolio.stats(settings=dict(risk_free_rate=0.0)) # Pass default risk_free_rate
-            else:
-                self._last_stats = pd.Series(dtype=float) 
             
             logger.info(f"Backtest completed for {symbol}. Trades: {portfolio.trades.count()}. Final Val: {portfolio.value().iloc[-1]:.2f}")
             return portfolio
@@ -246,7 +223,7 @@ class VectorBTEngine:
 
     def run_multiple_backtests(
         self,
-        data: pd.DataFrame,
+        data: Union[pd.DataFrame, EnrichedDataFrame],
         signals_dict: Dict[str, pd.DataFrame], 
         symbol: str,
         compare: bool = True
@@ -255,8 +232,7 @@ class VectorBTEngine:
         for name, signals_df in signals_dict.items():
             logger.info(f"Running backtest for variant: {name} on {symbol}")
             try:
-                # Ensure data and signals are fresh copies for each run if they were modified
-                portfolio = self.run_backtest(data.copy(), signals_df.copy(), symbol)
+                portfolio = self.run_backtest(data, signals_df, symbol)
                 results[name] = portfolio
             except Exception as e:
                 logger.error(f"Backtest failed for {name} on {symbol}: {e}")
@@ -267,7 +243,6 @@ class VectorBTEngine:
 
     def _generate_comparison(self, portfolios: Dict[str, vbt.Portfolio]):
         comparison_data = []
-        # Ensure there's at least one portfolio to get the symbol from
         first_pf_key = next(iter(portfolios), None)
         symbol_for_log = portfolios[first_pf_key].symbol if first_pf_key and hasattr(portfolios[first_pf_key], 'symbol') else 'N/A'
 
