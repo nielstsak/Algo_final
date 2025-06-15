@@ -1,0 +1,148 @@
+strategies:
+  SMACrossStrategy:
+    optimizable_params:
+      indicator_frequency:
+        type: "categorical"
+        choices: ['5m', '15m', '30m', '1h', '4h']
+      fast_period:
+        type: "int"
+        low: 5
+        high: 20
+        step: 2
+      slow_period:
+        type: "int"
+        low: 25
+        high: 60
+        step: 5
+      stop_loss_pct:
+        type: "float"
+        low: 0.01
+        high: 0.05
+        step: 0.005
+      take_profit_pct:
+        type: "float"
+        low: 0.02
+        high: 0.10
+        step: 0.01
+    fixed_params:
+      position_sizing_pct_capital: 0.02
+
+  PsarReversalOtocoStrategy:
+    optimizable_params:
+      indicator_frequency:
+        type: "categorical"
+        choices: ['5m', '15m', '30m', '1h', '4h']
+      psar_inc:
+        type: "float"
+        low: 0.01
+        high: 0.05
+        step: 0.01
+      psar_max:
+        type: "float"
+        low: 0.1
+        high: 0.3
+        step: 0.05
+      atr_period:
+        type: "int"
+        low: 10
+        high: 20
+        step: 2
+      atr_multiplier_sl:
+        type: "float"
+        low: 1.5
+        high: 3.0
+        step: 0.25
+      atr_multiplier_tp:
+        type: "float"
+        low: 2.0
+        high: 5.0
+        step: 0.5
+      otoco_candle_body_ratio_thld:
+        type: "float"
+        low: 0.6
+        high: 0.9
+        step: 0.05
+      otoco_wick_ratio_thld:
+        type: "float"
+        low: 0.05
+        high: 0.2
+        step: 0.01
+    fixed_params:
+      position_sizing_pct_capital: 0.8
+
+  BbandsVolumeRsiStrategy:
+    optimizable_params:
+      indicator_frequency:
+        type: "categorical"
+        choices: ['5m', '15m', '30m', '1h', '4h']
+      bb_period:
+        type: "int"
+        low: 15
+        high: 30
+        step: 1
+      bb_std_dev:
+        type: "float"
+        low: 1.5
+        high: 2.5
+        step: 0.1
+      rsi_period:
+        type: "int"
+        low: 7
+        high: 21
+        step: 1
+      rsi_overbought:
+        type: "int"
+        low: 65
+        high: 80
+        step: 1
+      rsi_oversold:
+        type: "int"
+        low: 20
+        high: 35
+        step: 1
+      volume_factor:
+        type: "float"
+        low: 1.0
+        high: 2.5
+        step: 0.1
+      volume_period:
+        type: "int"
+        low: 15
+        high: 30
+        step: 1
+    fixed_params:
+      position_sizing_pct_capital: 0.8
+
+  TripleMAAnticipationStrategy:
+    optimizable_params:
+      indicator_frequency:
+        type: "categorical"
+        choices: ['5m', '15m', '30m', '1h', '4h']
+      fast_period:
+        type: "int"
+        low: 5
+        high: 20
+        step: 1
+      medium_period:
+        type: "int"
+        low: 20
+        high: 50
+        step: 5
+      slow_period:
+        type: "int"
+        low: 50
+        high: 100
+        step: 5
+      stop_loss_pct:
+        type: "float"
+        low: 0.01
+        high: 0.15
+        step: 0.005
+      take_profit_pct:
+        type: "float"
+        low: 0.02
+        high: 0.20
+        step: 0.01
+    fixed_params:
+      position_sizing_pct_capital: 0.8
+      anticipation_threshold_pct: 0.001

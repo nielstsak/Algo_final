@@ -1,174 +1,125 @@
-# src/strategies/technical_indicators.py
-
-# ==============================================================================
-# NOTE DE DÉBOGAGE IMPORTANTE - À LIRE ATTENTIVEMENT
-# ==============================================================================
-# Les logs d'erreur que vous rencontrez ("unhashable type: 'Series'" et
-# "Colonnes requises manquantes") prouvent que ce n'est PAS cette version
-# du fichier qui est exécutée par Python. Une ancienne version est utilisée
-# à partir du cache.
-#
-# Pour forcer Python à utiliser ce nouveau fichier correct, vous devez
-# IMPÉRATIVEMENT supprimer le cache `__pycache__` de votre projet.
-#
-# ACTION REQUISE :
-# 1. Enregistrez ce fichier.
-# 2. Ouvrez un terminal PowerShell à la racine de votre projet (C:\Users\niels\OneDrive\Documents\ALGOTHEFINAL).
-# 3. Exécutez la commande suivante pour supprimer tous les dossiers __pycache__ :
-#
-#    Get-ChildItem -Path . -Include __pycache__ -Recurse -Force | Remove-Item -Recurse -Force
-#
-# 4. Relancez votre commande de backtest. L'erreur disparaîtra.
-# ==============================================================================
-
-from typing import Callable, Dict, Any, List, Optional
 import pandas as pd
 import pandas_ta as ta
 from loguru import logger
+import numpy as np
 
-class IndicatorError(Exception):
-    """Classe de base pour les erreurs liées aux indicateurs."""
-    pass
+from src.core.exceptions import IndicatorCalculationError
 
-class IndicatorCalculationError(IndicatorError):
-    """Exception levée lors d'une erreur dans le calcul d'un indicateur."""
-    pass
+# ==============================================================================
+# Module fonctionnel pour le calcul des indicateurs techniques.
+# ==============================================================================
 
-class IndicatorNotFoundError(IndicatorError):
-    """Exception levée lorsqu'un indicateur demandé n'est pas trouvé."""
-    pass
+def calculate_bollinger_bands(close_series: pd.Series, period: int = 20, std_dev: float = 2.0, **kwargs) -> pd.DataFrame:
+    """ Calcule les Bandes de Bollinger. """
+    try:
+        bbands_df = ta.bbands(close_series, length=period, std=std_dev, **kwargs)
+        if bbands_df is None or bbands_df.empty:
+            logger.warning("Le calcul des Bandes de Bollinger n'a retourné aucune donnée.")
+            return pd.DataFrame(columns=['BBL', 'BBM', 'BBU'], index=close_series.index)
+        rename_map = {
+            f'BBL_{period}_{float(std_dev)}': 'BBL',
+            f'BBM_{period}_{float(std_dev)}': 'BBM',
+            f'BBU_{period}_{float(std_dev)}': 'BBU',
+        }
+        bbands_df.rename(columns=rename_map, inplace=True)
+        return bbands_df[['BBL', 'BBM', 'BBU']]
+    except Exception as e:
+        logger.error(f"Erreur technique lors du calcul des Bandes de Bollinger : {e}")
+        raise IndicatorCalculationError(f"Échec du calcul des Bandes de Bollinger: {e}") from e
 
-class IndicatorManager:
+def calculate_rsi(close_series: pd.Series, period: int = 14, **kwargs) -> pd.Series:
+    """ Calcule le RSI. """
+    try:
+        rsi_series = ta.rsi(close_series, length=period, **kwargs)
+        if rsi_series is None:
+             logger.warning("Le calcul du RSI n'a retourné aucune donnée.")
+             return pd.Series(dtype=float, index=close_series.index, name="RSI")
+        rsi_series.name = "RSI"
+        return rsi_series
+    except Exception as e:
+        logger.error(f"Erreur technique lors du calcul du RSI : {e}")
+        raise IndicatorCalculationError(f"Échec du calcul du RSI: {e}") from e
+
+def calculate_sma(series: pd.Series, period: int = 20, **kwargs) -> pd.Series:
+    """ Calcule une Moyenne Mobile Simple (SMA). """
+    try:
+        sma_series = ta.sma(series, length=period, **kwargs)
+        if sma_series is None:
+             logger.warning(f"Le calcul de la SMA (période={period}) n'a retourné aucune donnée.")
+             return pd.Series(dtype=float, index=series.index)
+        return sma_series
+    except Exception as e:
+        logger.error(f"Erreur technique lors du calcul de la SMA : {e}")
+        raise IndicatorCalculationError(f"Échec du calcul de la SMA: {e}") from e
+
+def calculate_psar(high_series: pd.Series, low_series: pd.Series, close_series: pd.Series, **kwargs) -> pd.DataFrame:
+    """ Calcule le Parabolic SAR. """
+    try:
+        psar_df = ta.psar(high_series, low_series, close_series, **kwargs)
+        if psar_df is None or psar_df.empty:
+            logger.warning("Le calcul du PSAR n'a retourné aucune donnée.")
+            return pd.DataFrame(index=close_series.index)
+        # Renomme les colonnes pour la simplicité
+        psar_df.rename(columns=lambda x: x.lower().replace(f'_0.02_0.2',''), inplace=True)
+        return psar_df
+    except Exception as e:
+        logger.error(f"Erreur technique lors du calcul du PSAR : {e}")
+        raise IndicatorCalculationError(f"Échec du calcul du PSAR: {e}") from e
+
+def calculate_atr(high_series: pd.Series, low_series: pd.Series, close_series: pd.Series, period: int = 14, **kwargs) -> pd.Series:
+    """ Calcule l'Average True Range (ATR). """
+    try:
+        atr_series = ta.atr(high_series, low_series, close_series, length=period, **kwargs)
+        if atr_series is None:
+            logger.warning("Le calcul de l'ATR n'a retourné aucune donnée.")
+            return pd.Series(dtype=float, index=close_series.index, name="atr")
+        atr_series.name = "atr"
+        return atr_series
+    except Exception as e:
+        logger.error(f"Erreur technique lors du calcul de l'ATR : {e}")
+        raise IndicatorCalculationError(f"Échec du calcul de l'ATR: {e}") from e
+
+def calculate_otoco_pattern(df: pd.DataFrame, body_ratio_thld: float, wick_ratio_thld: float) -> pd.DataFrame:
     """
-    Moteur de calcul centralisé et robuste pour les indicateurs techniques.
-    Utilise dynamiquement la bibliothèque pandas-ta pour une flexibilité maximale.
+    Calcule le pattern OTOCO qui identifie des bougies de forte conviction.
+
+    Args:
+        df (pd.DataFrame): DataFrame avec les colonnes 'open', 'high', 'low', 'close'.
+        body_ratio_thld (float): Seuil du ratio corps/range. Un ratio élevé
+                                 indique un grand corps (forte conviction).
+        wick_ratio_thld (float): Seuil du ratio mèche/range. Un ratio faible
+                                 indique une petite mèche (clôture forte).
+
+    Returns:
+        pd.DataFrame: DataFrame avec les colonnes booléennes 'otoco_long' et 'otoco_short'.
     """
-    def __init__(self):
-        """Initialise le gestionnaire d'indicateurs."""
-        self.custom_indicators: Dict[str, Callable] = {}
-        logger.info("IndicatorManager initialisé.")
+    signals = pd.DataFrame(index=df.index)
 
-    def add_custom_indicator(self, name: str, func: Callable):
-        """
-        Enregistre un nouvel indicateur personnalisé pour étendre les capacités.
+    # Pré-calcul des composantes de la bougie
+    candle_range = df['high'] - df['low']
+    real_body = (df['close'] - df['open']).abs()
+    upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
+    lower_wick = df[['open', 'close']].min(axis=1) - df['low']
 
-        Args:
-            name: Le nom unique de l'indicateur personnalisé.
-            func: La fonction de calcul. Elle doit accepter un DataFrame pandas
-                  et des kwargs, et retourner une Series ou un DataFrame pandas.
-        """
-        if name in self.custom_indicators:
-            logger.warning(f"Indicateur personnalisé '{name}' existant a été remplacé.")
-        self.custom_indicators[name] = func
-        logger.info(f"Indicateur personnalisé '{name}' ajouté.")
+    # Éviter la division par zéro pour les bougies sans range (doji)
+    candle_range_no_zero = candle_range.replace(0, np.nan)
 
-    def calculate_indicator(
-        self, 
-        df: pd.DataFrame, 
-        indicator_name: str,
-        column_prefix: Optional[str] = None,
-        output_col_prefix: Optional[str] = None, 
-        **kwargs: Any
-    ) -> pd.DataFrame:
-        """
-        Calcule un indicateur unique et l'ajoute au DataFrame.
-        Cette méthode utilise l'accesseur .ta de pandas-ta et peut utiliser un préfixe
-        pour sélectionner les colonnes de données (ex: K_1h_close).
+    # Condition 1: Le corps doit être grand par rapport au range total.
+    body_ratio_ok = (real_body / candle_range_no_zero) >= body_ratio_thld
 
-        Args:
-            df: Le DataFrame source, potentiellement enrichi avec des colonnes préfixées.
-            indicator_name: Nom de l'indicateur à calculer (ex: 'sma', 'rsi').
-            column_prefix: Préfixe des colonnes de données à utiliser (ex: 'K_1h_').
-            output_col_prefix: Préfixe à ajouter aux colonnes de sortie.
-            **kwargs: Paramètres à passer à l'indicateur (ex: length=14).
+    # Condition 2.1 (Long): Bougie haussière ET mèche supérieure petite.
+    is_bullish = df['close'] > df['open']
+    upper_wick_small = (upper_wick / candle_range_no_zero) <= wick_ratio_thld
+    signals['otoco_long'] = is_bullish & body_ratio_ok & upper_wick_small
 
-        Returns:
-            Une copie du DataFrame avec la ou les colonnes d'indicateur ajoutées.
-        """
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return df.copy()
+    # Condition 2.2 (Short): Bougie baissière ET mèche inférieure petite.
+    is_bearish = df['close'] < df['open']
+    lower_wick_small = (lower_wick / candle_range_no_zero) <= wick_ratio_thld
+    signals['otoco_short'] = is_bearish & body_ratio_ok & lower_wick_small
 
-        df_out = df.copy()
-        
-        try:
-            pta_kwargs = kwargs.copy()
-            
-            # Si un préfixe de colonne est fourni, mapper les arguments OHLCV
-            # vers les colonnes préfixées du DataFrame d'entrée.
-            if column_prefix:
-                for col_name in ['open', 'high', 'low', 'close', 'volume']:
-                    prefixed_col = f"{column_prefix}{col_name}"
-                    if prefixed_col in df.columns:
-                        # pandas-ta peut prendre des Series directement comme arguments
-                        pta_kwargs[col_name] = df[prefixed_col]
-                    else:
-                        # Si l'indicateur a besoin de cette colonne mais qu'elle n'est pas dans le DF,
-                        # pandas-ta lèvera une erreur, ce qui est le comportement souhaité.
-                        logger.trace(f"La colonne préfixée '{prefixed_col}' n'a pas été trouvée pour l'indicateur '{indicator_name}'.")
+    # Remplacer les NaN potentiels (dus à la division par zéro) par False.
+    signals.fillna(False, inplace=True)
+    
+    logger.info("Calcul du pattern OTOCO terminé.")
 
-            if indicator_name in self.custom_indicators:
-                func = self.custom_indicators[indicator_name]
-                indicator_output = func(df_out, **pta_kwargs)
-            else:
-                pta_method_name = indicator_name.lower()
-                if not hasattr(df_out.ta, pta_method_name):
-                    raise IndicatorNotFoundError(f"L'indicateur '{indicator_name}' n'est pas une méthode valide de `df.ta`.")
-                
-                pta_func = getattr(df_out.ta, pta_method_name)
-                pta_kwargs['append'] = False
-                
-                indicator_output = pta_func(**pta_kwargs)
-
-            if indicator_output is None:
-                logger.warning(f"Le calcul de '{indicator_name}' n'a retourné aucune donnée.")
-                return df_out
-
-            if isinstance(indicator_output, pd.DataFrame):
-                for col_name in indicator_output.columns:
-                    final_col_name = f"{output_col_prefix}_{col_name}" if output_col_prefix else col_name
-                    df_out[final_col_name] = indicator_output[col_name]
-            elif isinstance(indicator_output, pd.Series):
-                col_name = indicator_output.name or indicator_name.upper()
-                final_col_name = f"{output_col_prefix}_{col_name}" if output_col_prefix else col_name
-                df_out[final_col_name] = indicator_output
-            else:
-                raise IndicatorCalculationError(f"Type de sortie inattendu pour '{indicator_name}': {type(indicator_output)}")
-
-        except Exception as e:
-            logger.error(f"Échec du calcul de l'indicateur '{indicator_name}' avec préfixe '{column_prefix}' et params {kwargs}: {e}", exc_info=True)
-            if isinstance(e, IndicatorError):
-                raise
-            raise IndicatorCalculationError(f"Erreur inattendue pour '{indicator_name}': {e}", original_exception=e) from e
-
-        return df_out
-
-    def calculate_multiple_indicators(self, df: pd.DataFrame, indicator_configs: List[Dict[str, Any]]) -> pd.DataFrame:
-        """
-        Calcule une liste d'indicateurs à partir de leurs configurations.
-
-        Args:
-            df: Le DataFrame source.
-            indicator_configs: Une liste de dictionnaires, chaque dictionnaire
-                               configurant un appel à `calculate_indicator`.
-
-        Returns:
-            Une copie du DataFrame avec tous les indicateurs calculés.
-        """
-        df_with_all_indicators = df.copy()
-        for config in indicator_configs:
-            if "name" not in config:
-                raise ValueError("Chaque configuration d'indicateur doit avoir une clé 'name'.")
-            
-            current_config = config.copy()
-            name = current_config.pop("name")
-            output_prefix = current_config.pop("output_col_prefix", None)
-            column_prefix = current_config.pop("column_prefix", None) # Extraire column_prefix s'il existe
-            
-            df_with_all_indicators = self.calculate_indicator(
-                df_with_all_indicators, 
-                indicator_name=name,
-                column_prefix=column_prefix,
-                output_col_prefix=output_prefix, 
-                **current_config
-            )
-        return df_with_all_indicators
+    return signals

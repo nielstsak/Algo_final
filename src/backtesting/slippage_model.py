@@ -1,180 +1,170 @@
 # src/backtesting/slippage_model.py
+
+"""
+Ce module définit des modèles pour simuler le slippage (glissement de prix)
+lors de l'exécution des trades. Il utilise une architecture flexible à base de
+classes, similaire à celle du `fee_calculator`.
+
+Chaque modèle de slippage est encapsulé dans sa propre classe, et une fonction
+factory (`get_slippage_model`) sélectionne le modèle approprié en fonction
+de la configuration `SlippageConfig`.
+"""
+
+from abc import ABC, abstractmethod
+import logging
 import pandas as pd
 import numpy as np
-from typing import Union, Optional
-from loguru import logger
 
-class SlippageModel:
+# --- Imports Locaux ---
+from src.optimization.config import SlippageConfig
+from src.core.exceptions import ConfigurationError, DataError
+
+logger = logging.getLogger(__name__)
+
+
+class SlippageModel(ABC):
     """
-    Classe de base pour modéliser le slippage.
-    Le slippage est la différence entre le prix attendu d'un trade et le prix auquel le trade est effectivement exécuté.
+    Classe de base abstraite pour tous les modèles de slippage.
+
+    Chaque modèle doit être capable de générer une série de valeurs de slippage
+    correspondant à une série de prix, car c'est ainsi que vectorbt l'applique.
     """
-    def calculate_slippage(
-        self,
-        data: pd.DataFrame, # Données OHLCV ou de prix
-        symbol: str,
-        trade_on_close: bool = False, # Si True, le trade est supposé être au prix de clôture (moins de slippage)
-                                     # Si False, le trade est au prix d'ouverture suivant (plus de slippage potentiel)
-        order_size: Optional[Union[float, pd.Series]] = None, # Taille de l'ordre (en actif de base)
-        is_market_order: Union[bool, pd.Series] = True # Si True, c'est un ordre au marché (plus de slippage)
-    ) -> Union[float, pd.Series]:
+    @abstractmethod
+    def generate_slippage_series(self, price_series: pd.Series) -> pd.Series:
         """
-        Calcule le taux de slippage.
-        Doit être surchargée par les classes enfants pour des modèles plus complexes.
+        Génère une série de valeurs de slippage.
 
         Args:
-            data: DataFrame contenant les données de prix ou OHLCV.
-                  Peut être utilisé pour des modèles basés sur la volatilité ou le volume.
-            symbol: Symbole de la paire de trading.
-            trade_on_close: Indique si le trade est exécuté à la clôture ou à l'ouverture suivante.
-            order_size: Taille de l'ordre. Peut influencer le slippage.
-            is_market_order: Si True, l'ordre est au marché. Les ordres limites subissent moins de slippage.
+            price_series: La série de prix sur laquelle le slippage doit être calculé.
+                          Typiquement la série des prix de clôture ('close').
 
         Returns:
-            Taux de slippage (ex: 0.0005 pour 0.05%).
-            Peut être un float (slippage fixe) ou une pd.Series (slippage variable).
+            Une série pandas avec les valeurs de slippage (en pourcentage) pour chaque point de données.
         """
-        raise NotImplementedError("La méthode calculate_slippage doit être implémentée par la sous-classe.")
+        pass
 
-class FixedSlippageModel(SlippageModel):
+class PercentageSlippage(SlippageModel):
     """
-    Modèle de slippage simple avec un taux fixe.
+    Modélise le slippage comme un pourcentage fixe du prix d'exécution.
     """
-    def __init__(self, fixed_rate: float = 0.0005): # 0.05% par défaut
-        if not (0 <= fixed_rate < 1):
-            raise ValueError("Le taux de slippage fixe doit être compris entre 0 et 1 (exclusif de 1).")
-        self.fixed_rate = fixed_rate
-        logger.info(f"FixedSlippageModel initialized with rate: {self.fixed_rate*100:.4f}%")
+    def __init__(self, percentage: float):
+        if not (0 <= percentage < 1):
+            raise ValueError("Le pourcentage de slippage doit être compris entre 0 et 1.")
+        self.percentage = percentage
+        logger.debug(f"Initialisation de PercentageSlippage avec une valeur de {self.percentage:.4%}.")
 
-    def calculate_slippage(
-        self,
-        data: pd.DataFrame,
-        symbol: str,
-        trade_on_close: bool = False,
-        order_size: Optional[Union[float, pd.Series]] = None,
-        is_market_order: Union[bool, pd.Series] = True
-    ) -> Union[float, pd.Series]:
+    def generate_slippage_series(self, price_series: pd.Series) -> pd.Series:
         """
-        Retourne le taux de slippage fixe.
-
-        Args:
-            data, symbol, trade_on_close, order_size, is_market_order: Non utilisés dans ce modèle simple.
-
-        Returns:
-            Le taux de slippage fixe.
+        Retourne une série où chaque valeur est le pourcentage de slippage constant.
         """
-        return self.fixed_rate
+        return pd.Series(self.percentage, index=price_series.index)
 
-class VolumeBasedSlippageModel(SlippageModel):
+class FixedPerTradeSlippage(SlippageModel):
     """
-    Modèle de slippage qui dépend du volume de trading et de la taille de l'ordre.
-    Ceci est une implémentation très simplifiée.
+    Modélise le slippage comme un montant monétaire fixe par trade.
+    Ce montant est ensuite converti en pourcentage du prix au moment du trade.
     """
-    def __init__(
-        self,
-        base_slippage_rate: float = 0.0001, # 0.01%
-        volume_sensitivity_factor: float = 0.1, # Comment le slippage augmente avec la taille de l'ordre / volume du marché
-        avg_daily_volume_period: int = 20 # Période pour calculer le volume quotidien moyen
-    ):
-        self.base_slippage_rate = base_slippage_rate
-        self.volume_sensitivity_factor = volume_sensitivity_factor
-        self.avg_daily_volume_period = avg_daily_volume_period
-        logger.info(f"VolumeBasedSlippageModel initialized: base_rate={base_slippage_rate*100:.4f}%, sensitivity={volume_sensitivity_factor}")
+    def __init__(self, fixed_amount: float):
+        if fixed_amount < 0:
+            raise ValueError("Le montant fixe de slippage ne peut pas être négatif.")
+        self.fixed_amount = fixed_amount
+        logger.debug(f"Initialisation de FixedPerTradeSlippage avec un montant de {self.fixed_amount}.")
 
-    def calculate_slippage(
-        self,
-        data: pd.DataFrame, # Doit contenir 'volume' et 'close'
-        symbol: str,
-        trade_on_close: bool = False,
-        order_size: Optional[Union[float, pd.Series]] = None, # Taille de l'ordre en actif de base
-        is_market_order: Union[bool, pd.Series] = True
-    ) -> Union[float, pd.Series]:
+    def generate_slippage_series(self, price_series: pd.Series) -> pd.Series:
         """
-        Calcule le slippage basé sur le volume.
-
-        Args:
-            data: DataFrame avec au moins les colonnes 'volume' et 'close'.
-            symbol: Symbole de la paire.
-            trade_on_close: Non utilisé directement ici, mais pourrait l'être.
-            order_size: Taille de l'ordre en actif de base. Si None, utilise un slippage de base.
-            is_market_order: Si False (ordre limite), le slippage peut être réduit.
-
-        Returns:
-            Taux de slippage (float ou pd.Series).
+        Calcule le slippage en pourcentage en divisant le montant fixe par le prix.
         """
-        if 'volume' not in data.columns or 'close' not in data.columns:
-            logger.warning("Colonnes 'volume' ou 'close' manquantes pour VolumeBasedSlippageModel. Retour au slippage de base.")
-            return self.base_slippage_rate
+        # Éviter la division par zéro
+        slippage_series = self.fixed_amount / price_series.replace(0, np.nan)
+        return slippage_series.fillna(0)
 
-        # Calculer le volume quotidien moyen (approximatif si les données ne sont pas journalières)
-        # Pour simplifier, on utilise le volume de la barre actuelle comme proxy de liquidité instantanée
-        # Un meilleur modèle utiliserait le volume moyen sur une période.
-        # Ici, data['volume'] est le volume de la barre (ex: 1m, 1h).
-        # On a besoin du volume de l'actif de base.
-        market_liquidity_proxy = data['volume'] # Volume de la barre actuelle
+class VolatilityAdjustedSlippage(SlippageModel):
+    """
+    Modélise le slippage comme une fonction de la volatilité du marché.
+    Le slippage augmente lorsque le marché est plus volatil.
+    """
+    def __init__(self, value: float, volatility_window: int, volatility_multiplier: float):
+        self.base_slippage = value
+        self.volatility_window = volatility_window
+        self.volatility_multiplier = volatility_multiplier
+        logger.debug(f"Initialisation de VolatilityAdjustedSlippage (window={self.volatility_window}, mult={self.volatility_multiplier}).")
 
-        # Si order_size n'est pas fourni ou si la liquidité est nulle/NaN, retourner le slippage de base
-        if order_size is None or (isinstance(market_liquidity_proxy, pd.Series) and (market_liquidity_proxy.isnull().all() or (market_liquidity_proxy == 0).all())):
-            return self.base_slippage_rate
+    def generate_slippage_series(self, price_series: pd.Series) -> pd.Series:
+        """
+        Calcule une série de slippage dynamique basée sur la volatilité.
+        """
+        daily_returns = price_series.pct_change()
+        # Calcul de la volatilité glissante (écart-type des rendements)
+        rolling_volatility = daily_returns.rolling(window=self.volatility_window).std()
         
-        # S'assurer que order_size est une série si market_liquidity_proxy l'est
-        if isinstance(market_liquidity_proxy, pd.Series) and not isinstance(order_size, pd.Series):
-            order_size_series = pd.Series(order_size, index=market_liquidity_proxy.index)
-        elif isinstance(order_size, pd.Series):
-            order_size_series = order_size
-        else: # Les deux sont des scalaires
-            order_size_series = pd.Series(order_size) # Pour uniformiser
-            market_liquidity_proxy = pd.Series(market_liquidity_proxy, index=order_size_series.index)
-
-
-        # Ratio de la taille de l'ordre par rapport à la liquidité du marché
-        # Remplacer les liquidités nulles ou NaN pour éviter la division par zéro
-        market_liquidity_proxy_safe = market_liquidity_proxy.replace(0, np.nan).fillna(method='ffill').fillna(1e-9) # Remplacer 0 par une petite valeur
+        # Le slippage est le slippage de base plus un composant lié à la volatilité
+        dynamic_slippage = self.base_slippage + (rolling_volatility * self.volatility_multiplier)
         
-        order_to_liquidity_ratio = (order_size_series / market_liquidity_proxy_safe).fillna(0)
-
-        # Calcul du slippage
-        # Formule exemple: slippage = base_rate + sensitivity * (order_size / market_volume_proxy)
-        # Le slippage augmente si la taille de l'ordre est grande par rapport au volume disponible.
-        slippage = self.base_slippage_rate + self.volume_sensitivity_factor * order_to_liquidity_ratio
-        
-        # Ajuster pour les ordres limites (moins de slippage)
-        if isinstance(is_market_order, pd.Series):
-            slippage = np.where(is_market_order, slippage, slippage * 0.5) # Ex: 50% de réduction pour ordres limites
-        elif not is_market_order:
-            slippage *= 0.5
-
-        # S'assurer que le slippage n'est pas négatif et plafonner si nécessaire
-        slippage_final = np.clip(slippage, 0, 0.1) # Plafonner à 10% max pour éviter des valeurs extrêmes
-
-        if isinstance(slippage_final, pd.Series):
-            return slippage_final.fillna(self.base_slippage_rate) # Remplir les NaN restants
-        return slippage_final if pd.notna(slippage_final) else self.base_slippage_rate
+        # Remplacer les NaN (au début de la série) par le slippage de base
+        return dynamic_slippage.fillna(self.base_slippage)
 
 
-# Exemple d'utilisation:
-if __name__ == "__main__":
-    fixed_model = FixedSlippageModel(fixed_rate=0.001)
-    print(f"Fixed Slippage: {fixed_model.calculate_slippage(None, 'BTCUSDT')*100:.3f}%") # type: ignore
+def get_slippage_model(config: SlippageConfig) -> SlippageModel:
+    """
+    Factory qui retourne une instance du modèle de slippage approprié
+    en fonction de l'objet de configuration `SlippageConfig`.
 
-    # Pour VolumeBasedSlippageModel
-    idx = pd.date_range('2023-01-01', periods=5, freq='h')
-    test_data = pd.DataFrame({
-        'close': [100, 101, 102, 103, 104],
-        'volume': [1000, 1200, 800, 1500, 900] # Volume de l'actif de base pour la barre
-    }, index=idx)
+    Args:
+        config: Un objet `SlippageConfig`.
 
-    volume_model = VolumeBasedSlippageModel(base_slippage_rate=0.0002, volume_sensitivity_factor=0.05)
-    
-    # Slippage avec taille d'ordre scalaire
-    slippage1 = volume_model.calculate_slippage(test_data, 'BTCUSDT', order_size=50) # Ordre de 50 BTC
-    print(f"\nVolume Based Slippage (order_size=50):\n{slippage1*100}")
+    Returns:
+        Une instance d'une sous-classe de `SlippageModel`.
 
-    # Slippage avec taille d'ordre en série
-    order_sizes_series = pd.Series([10, 20, 5, 30, 8], index=idx)
-    slippage2 = volume_model.calculate_slippage(test_data, 'BTCUSDT', order_size=order_sizes_series)
-    print(f"\nVolume Based Slippage (order_size as Series):\n{slippage2*100}")
-    
-    # Slippage pour un ordre limite
-    slippage_limit = volume_model.calculate_slippage(test_data, 'BTCUSDT', order_size=50, is_market_order=False)
-    print(f"\nVolume Based Slippage (order_size=50, Limit Order):\n{slippage_limit*100}")
+    Raises:
+        ConfigurationError: Si la méthode de slippage n'est pas supportée.
+    """
+    method = config.method
+    logger.info(f"Création d'un modèle de slippage de type '{method}'.")
+
+    if method == 'PERCENTAGE':
+        return PercentageSlippage(percentage=config.value)
+    elif method == 'FIXED_PER_TRADE':
+        return FixedPerTradeSlippage(fixed_amount=config.value)
+    elif method == 'VOLATILITY_ADJUSTED':
+        if config.volatility_window is None or config.volatility_multiplier is None:
+            raise ConfigurationError("`volatility_window` et `volatility_multiplier` sont requis pour le slippage ajusté à la volatilité.")
+        return VolatilityAdjustedSlippage(
+            value=config.value,
+            volatility_window=config.volatility_window,
+            volatility_multiplier=config.volatility_multiplier
+        )
+    else:
+        raise ConfigurationError(f"Méthode de slippage non supportée : '{method}'")
+
+
+# --- Exemple d'utilisation ---
+if __name__ == '__main__':
+    # Créer un faux jeu de données
+    dates = pd.to_datetime(pd.date_range(start='2023-01-01', periods=200, freq='D'))
+    price_data = pd.Series(
+        np.random.randn(len(dates)).cumsum() + 100,
+        index=dates
+    )
+    price_data.name = 'close'
+
+    # Scénario 1: Slippage en pourcentage
+    slippage_config_pct = SlippageConfig(method='PERCENTAGE', value=0.0005) # 0.05%
+    model_pct = get_slippage_model(slippage_config_pct)
+    series_pct = model_pct.generate_slippage_series(price_data)
+    print("--- Modèle de Slippage en Pourcentage ---")
+    print(f"Valeur constante attendue : {slippage_config_pct.value}")
+    print(series_pct.head())
+
+    # Scénario 2: Slippage ajusté à la volatilité
+    slippage_config_vol = SlippageConfig(
+        method='VOLATILITY_ADJUSTED',
+        value=0.0001, # 0.01% de base
+        volatility_window=10,
+        volatility_multiplier=0.5
+    )
+    model_vol = get_slippage_model(slippage_config_vol)
+    series_vol = model_vol.generate_slippage_series(price_data)
+    print("\n--- Modèle de Slippage Ajusté à la Volatilité ---")
+    print("Le slippage devrait varier avec la volatilité des prix :")
+    print(series_vol.tail())
+    series_vol.plot(title="Slippage Dynamique (Ajusté à la Volatilité)").get_figure()

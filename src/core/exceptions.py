@@ -138,6 +138,11 @@ class BacktestError(AlgoBotException):
     """Erreur générale liée au processus de backtesting."""
     pass
 
+# CLASSE AJOUTÉE CI-DESSOUS
+class BacktestFailureError(BacktestError):
+    """Erreur levée quand un backtest ne peut pas être complété (ex: aucun trade)."""
+    pass
+
 class BacktestSetupError(BacktestError):
     """Erreur dans la configuration ou la préparation d'un backtest."""
     pass
@@ -209,15 +214,3 @@ class InitializationError(AlgoBotException):
     def __init__(self, message: str, component_name: Optional[str] = None, original_exception: Optional[Exception] = None, **kwargs: Any):
         super().__init__(message, original_exception, component_name=component_name, **kwargs)
         self.component_name = component_name
-
-# Exemple d'utilisation:
-# try:
-#     # some_operation_that_might_fail()
-#     raise ValueError("Something went wrong at a low level")
-# except ValueError as e:
-#     raise DataDownloadError("Failed to download klines for BTCUSDT", source="Binance", symbol="BTCUSDT", original_exception=e)
-#
-# try:
-#     raise BinanceInvalidSymbolError("Symbol 'XYZABC' is not valid on Binance.", symbol="XYZABC", binance_code=-1121)
-# except AlgoBotException as abe:
-#     print(abe) # Affichera le message formaté avec contexte et cause originale

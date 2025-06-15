@@ -29,6 +29,8 @@ from src.core.exceptions import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# --- CORRECTION ---
+# Le chemin pointe maintenant vers le dossier /configs/
 CONFIG_FILE_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
@@ -195,12 +197,15 @@ class TradingConfig(BaseModel):
     @validator('allowed_pairs', each_item=True) 
     @classmethod
     def check_pair_format(cls, v: str) -> str:
-        if not v.isupper() or not v.isalnum() or len(v) < 6:
-            raise InvalidConfigurationValueError(
-                message=f"Trading pair '{v}' format is invalid. Expected uppercase alphanumeric, e.g., 'BTCUSDC'.",
-                parameter="allowed_pairs", value=v
-            )
-        return v
+        # This check is too strict for pairs with "/"
+        # A better check would be to see if it matches a regex or just ensure it's a string.
+        # For now, let's relax it slightly. The main validation is that the list is not empty.
+        if not isinstance(v, str) or len(v) < 6:
+             raise InvalidConfigurationValueError(
+                 message=f"Trading pair '{v}' format is invalid. Expected a string like 'BTC/USDT'.",
+                 parameter="allowed_pairs", value=v
+             )
+        return v.replace("/", "") # Standardize to a format without slashes internally if needed
 
 class RiskConfig(BaseModel):
     max_position_pct: float = Field(0.1, gt=0, le=1)
@@ -359,7 +364,7 @@ class Settings(BaseSettings):
                  allowed_pairs_final = env_pairs_str
 
         elif not allowed_pairs_final: 
-             allowed_pairs_final = TradingConfig.model_fields['allowed_pairs'].default_factory()
+              allowed_pairs_final = TradingConfig.model_fields['allowed_pairs'].default_factory()
 
         values['trading'] = {
             "mode": values.get('TRADING_MODE', trading_yaml_data.get('mode', TradingConfig.model_fields['mode'].default)),
@@ -409,11 +414,11 @@ class Settings(BaseSettings):
         if not binance_cfg or not isinstance(binance_cfg, BinanceConfigModel):
             raise MissingConfigurationError(message="Binance configuration is required.", item="binance")
         if not binance_cfg.api_key or not binance_cfg.api_secret:
-             raise MissingConfigurationError(message="Binance api_key and api_secret are required.", item="binance.api_key/api_secret")
+              raise MissingConfigurationError(message="Binance api_key and api_secret are required.", item="binance.api_key/api_secret")
 
         db_config: Optional[DatabaseConfigModel] = values.get('database')
         if not db_config or not isinstance(db_config, DatabaseConfigModel):
-             raise MissingConfigurationError(message="Database configuration is required.", item="database")
+              raise MissingConfigurationError(message="Database configuration is required.", item="database")
         if not db_config.url and db_config.db_type != "sqlite" and not (db_config.sqlite_path and db_config.sqlite_path == ":memory:"): 
             raise MissingConfigurationError(message=f"{db_config.db_type} URL is missing and could not be constructed.", item="database.url")
 
@@ -432,9 +437,9 @@ class Settings(BaseSettings):
                 )
             if not db_config.url or not (isinstance(db_config.url, PostgresDsn) or (isinstance(db_config.url, str) and db_config.url.startswith("postgresql"))):
                  raise InvalidConfigurationValueError(
-                    message="A valid PostgreSQL URL (database.url) is required when data.storage_type is 'postgres'.",
-                    parameter="database.url"
-                )
+                     message="A valid PostgreSQL URL (database.url) is required when data.storage_type is 'postgres'.",
+                     parameter="database.url"
+                 )
         
         system_config: Optional[SystemConfig] = values.get('system') # NEW
         if not system_config or not isinstance(system_config, SystemConfig):
@@ -449,7 +454,7 @@ def load_raw_config_from_yaml(config_path: Path) -> Dict[str, Any]:
         with open(config_path, 'r', encoding='utf-8') as f:
             raw_config = yaml.safe_load(f)
         if raw_config is None:
-             return {} 
+              return {} 
         if not isinstance(raw_config, dict):
             raise InvalidConfigurationValueError(
                 message=f"Configuration file {config_path} content is not a valid YAML dictionary.",
@@ -473,7 +478,7 @@ def load_settings() -> Settings:
         for error in e.errors(include_url=False, include_input=False): 
             loc_str = " -> ".join(map(str, error['loc']))
             msg = error['msg']
-            error_details.append(f"  - Location: '{loc_str}', Message: '{msg}'")
+            error_details.append(f"   - Location: '{loc_str}', Message: '{msg}'")
         error_messages_str = "\n".join(error_details)
         raise ConfigurationError(f"Configuration validation failed:\n{error_messages_str}", original_exception=e)
     except ConfigurationError:
@@ -496,4 +501,3 @@ except Exception as e: # Catch any other exception during setup
     import traceback
     traceback.print_exc()
     raise
-

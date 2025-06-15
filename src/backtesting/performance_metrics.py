@@ -1,4 +1,3 @@
-# src/backtesting/performance_metrics.py
 import pandas as pd
 import numpy as np
 import vectorbt as vbt
@@ -139,18 +138,15 @@ class PerformanceMetrics:
         if drawdowns_df.empty:
             return None
 
-        # CORRECTION: Calcul manuel du drawdown pour trouver le plus grand
         if 'Peak Value' in drawdowns_df.columns and 'Valley Value' in drawdowns_df.columns:
-            # S'assurer que les colonnes sont numériques et gérer les divisions par zéro
             peak_values = pd.to_numeric(drawdowns_df['Peak Value'], errors='coerce')
             valley_values = pd.to_numeric(drawdowns_df['Valley Value'], errors='coerce')
             
-            # Calculer le drawdown en pourcentage (valeur positive)
             drawdown_pct = (peak_values - valley_values) / peak_values.replace(0, np.nan)
             drawdowns_df['CalculatedDrawdown'] = drawdown_pct
             
             if drawdowns_df['CalculatedDrawdown'].notna().any():
-                 mdd_record = drawdowns_df.loc[drawdowns_df['CalculatedDrawdown'].idxmax()]
+                    mdd_record = drawdowns_df.loc[drawdowns_df['CalculatedDrawdown'].idxmax()]
             else:
                 logger.warning("Impossible de calculer le drawdown à partir de Peak/Valley values.")
                 return None
@@ -158,7 +154,7 @@ class PerformanceMetrics:
             logger.warning(f"Colonnes 'Peak Value' ou 'Valley Value' non trouvées pour calculer le drawdown. Colonnes: {list(drawdowns_df.columns)}")
             return None
 
-        recovery_date = mdd_record.get('End Timestamp') # 'End Timestamp' est la date de récupération
+        recovery_date = mdd_record.get('End Timestamp')
         valley_date = mdd_record.get('Valley Timestamp')
         
         if pd.isna(recovery_date) or pd.isna(valley_date):
@@ -249,24 +245,11 @@ class PerformanceMetrics:
             return 0.0
         
         try:
-            # CORRECTION: Méthode robuste pour calculer la durée en position
-            if hasattr(portfolio.trades, 'total_duration'):
-                total_time_in_market_bars = portfolio.trades.total_duration
-            else:
-                # Fallback manuel
-                trades_records = portfolio.trades.records_readable
-                if trades_records.empty:
-                    return 0.0
-                total_duration_series = trades_records['Exit Timestamp'] - trades_records['Entry Timestamp']
-                total_time_in_market = total_duration_series.sum()
-            
-            if portfolio.wrapper.freq is not None:
-                 if not hasattr(portfolio.trades, 'total_duration'):
-                     total_time_in_market_seconds = total_time_in_market.total_seconds()
-                 else:
-                     total_time_in_market_seconds = (total_time_in_market_bars * portfolio.wrapper.freq).total_seconds()
-            else:
-                return np.nan
+            trades_records = portfolio.trades.records_readable
+            if trades_records.empty:
+                return 0.0
+            total_time_in_market = (trades_records['Exit Timestamp'] - trades_records['Entry Timestamp']).sum()
+            total_time_in_market_seconds = total_time_in_market.total_seconds()
 
             start_time = portfolio.wrapper.index[0]
             end_time = portfolio.wrapper.index[-1]
@@ -431,7 +414,7 @@ class PerformanceMetrics:
                     else:
                         metrics[f"vbt_{k.replace(' ', '_').lower()}"] = np.nan
                 else:
-                     metrics[f"vbt_{k.replace(' ', '_').lower()}"] = v
+                    metrics[f"vbt_{k.replace(' ', '_').lower()}"] = v
         except Exception as e:
             pass
 
@@ -494,7 +477,7 @@ class PerformanceMetrics:
         flat_metrics = {}
         for category, cat_metrics in metrics.items():
             if isinstance(cat_metrics, dict):
-                 for key, value in cat_metrics.items():
+                for key, value in cat_metrics.items():
                     flat_metrics[f"{category}_{key}"] = value
             else:
                 flat_metrics[category] = cat_metrics
@@ -504,6 +487,9 @@ class PerformanceMetrics:
         flat_metrics['general_duration_days'] = (portfolio.wrapper.index[-1] - portfolio.wrapper.index[0]).days
         flat_metrics['general_initial_capital'] = portfolio.init_cash
         flat_metrics['general_final_value'] = portfolio.value().iloc[-1]
+        # --- CORRECTION: Ajout de la métrique PnL nette totale ---
+        flat_metrics['general_total_net_pnl'] = portfolio.value().iloc[-1] - portfolio.init_cash
+        # --- FIN DE LA CORRECTION ---
         
         return flat_metrics
 

@@ -1,0 +1,90 @@
+# ==============================================================================
+# FICHIER DE CONFIGURATION POUR L'OPTIMISATION (FORMAT FINAL)
+# ------------------------------------------------------------------------------
+# Ce fichier est basé sur les modèles Pydantic définis dans `optimization.config`.
+# Il contrôle tous les aspects de la simulation, du Walk-Forward Optimization (WFO)
+# et de l'optimisation des hyperparamètres avec Optuna.
+# ==============================================================================
+
+# SECTION 1: CONFIGURATION DE LA SIMULATION (BACKTESTING)
+# ------------------------------------------------------------------------------
+# Ces paramètres définissent l'environnement pour chaque backtest individuel
+# exécuté pendant l'optimisation.
+simulation_config:
+  initial_capital: 1000.0
+  leverage: 5.0
+  
+  # Configuration des frais de transaction.
+  # method: 'PERCENTAGE' ou 'FIXED_PER_TRADE'
+  fee_config:
+    method: 'PERCENTAGE'
+    value: 0.0075 # Correspond à 0.1%
+
+  # Configuration du modèle de slippage (glissement de prix).
+  # method: 'PERCENTAGE', 'FIXED_PER_TRADE', ou 'VOLATILITY_ADJUSTED'
+  slippage_config:
+    method: 'VOLATILITY_ADJUSTED'
+    value: 0.0002 # Slippage de base (0.02%)
+    volatility_window: 20 # Fenêtre de calcul de la volatilité (en jours)
+    volatility_multiplier: 0.5 # Facteur à appliquer à la volatilité calculée
+
+# SECTION 2: CONFIGURATION DU WALK-FORWARD OPTIMIZATION (WFO)
+# ------------------------------------------------------------------------------
+# Contrôle le processus de validation croisée temporelle.
+wfo_config:
+  enabled: true # Mettre à `false` pour faire une optimisation simple sur toute la période.
+
+  # Configuration de la méthode de découpage (split).
+  split_config:
+    type: 'FIXED_TIME'
+    
+    # Le paramètre `is_days` est maintenant optionnel.
+    # Si la clé est omise ou mise à `null`, sa valeur sera calculée
+    # automatiquement à partir de la durée totale des données, de `n_splits` et `oos_days`.
+    # is_days: 120
+    
+    oos_days: 20           # Durée en jours de la période Out-of-Sample (validation)
+    n_splits: 3           # Nombre total de découpages à effectuer
+    expanding_window: false # `false` pour une fenêtre glissante, `true` pour une fenêtre expansive
+
+  # Configuration pour le purging et l'embargo pour éviter la fuite de données.
+  purge_and_embargo:
+    purging_days: 7 # Jours à retirer à la fin de la période IS
+    embargo_days: 3 # Jours à ignorer au début de la période OOS
+
+  # Configuration pour la validation des meilleurs essais.
+  validation_config:
+    n_best_trials_to_validate: 3 # Valider les 3 meilleurs essais de IS sur OOS
+
+# SECTION 3: CONFIGURATION DE L'OPTIMISATION (OPTUNA)
+# ------------------------------------------------------------------------------
+# Paramètres pour l'optimiseur d'hyperparamètres Optuna.
+optuna_config:
+  # Liste des objectifs. Mettre plusieurs objectifs pour une optimisation multi-objectif.
+  objectives:
+    - name: 'sharpe_ratio'
+      direction: 'maximize'
+    - name: 'general_total_net_pnl'
+      direction: 'maximize'
+
+  n_trials: 250 # Nombre total d'essais d'hyperparamètres à lancer
+  n_jobs: 4    # Nombre de processus parallèles (-1 pour utiliser tous les cœurs CPU)
+
+  # Profils prédéfinis pour le couple sampler/pruner.
+  # 'DEFAULT_TPE', 'NSGAII_HYPERBAND' (pour multi-objectif), 'CMAES_MEDIAN', 'CUSTOM'
+  profile: 'NSGAII_HYPERBAND'
+
+  # Stratégie pour choisir le meilleur essai depuis un front de Pareto (multi-objectif).
+  pareto_selection:
+    strategy: 'COMPOSITE_SCORE'
+    weights:
+      sharpe_ratio: 1.5
+      max_drawdown: -1.0 # Poids négatif car on minimise
+
+  # Paramètres avancés et optionnels
+  sampler_params:
+    seed: 42 # Pour la reproductibilité
+  pruner_params:
+    n_warmup_steps: 10
+  
+  study_name: "wfo-multi-obj-study-final" # Nom de l'étude dans la base de données sqlite

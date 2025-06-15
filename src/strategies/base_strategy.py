@@ -45,25 +45,28 @@ class BaseStrategy(ABC):
     def __init__(self, params: Optional[Dict[str, Any]] = None, **kwargs):
         """
         Initialise la stratégie avec les paramètres fournis.
-        Fusionne les paramètres des modèles Pydantic, les params par défaut, 
-        le dictionnaire `params` et les `kwargs`, puis valide le tout.
         
         Args:
             params: Dictionnaire des paramètres de la stratégie.
-            **kwargs: Paramètres additionnels passés directement.
+            **kwargs: Paramètres additionnels (hyperparamètres et arguments de contexte).
         """
-        # 1. Obtenir les valeurs par défaut des modèles Pydantic
+        # --- CORRECTION 1 : GESTION DES KWARGS ---
+        # Extraire les arguments de contexte qui ne sont pas des hyperparamètres
+        # pour éviter qu'ils ne soient inclus dans la validation Pydantic.
+        self.pair_symbol = kwargs.pop('pair_symbol', None)
+        kwargs.pop('strategy_name', None) # Retiré pour ne pas polluer les params
+
+        # Obtenir les valeurs par défaut des modèles Pydantic
         fixed_defaults = self.fixed_params_model().model_dump()
         optimizable_defaults = self.optimizable_params_model().model_dump()
 
-        # 2. Fusionner les paramètres avec l'ordre de priorité suivant :
-        #    Pydantic < default_params < dictionnaire `params` < kwargs
+        # Fusionner les paramètres avec un ordre de priorité clair :
+        # Pydantic defaults < legacy defaults < Optuna kwargs < `params` dict
         all_defaults = {**fixed_defaults, **optimizable_defaults, **self.default_params}
-        self.params = {**all_defaults, **(params or {}), **kwargs}
+        self.params = {**all_defaults, **kwargs, **(params or {})}
         
         self.validate_params()
         
-        # Initialisation des caches et logging
         self._indicators_cache: Optional[pd.DataFrame] = None
         self._signals_cache: Optional[pd.DataFrame] = None
         
@@ -71,39 +74,44 @@ class BaseStrategy(ABC):
 
     def validate_params(self) -> None:
         """
-        Valide les paramètres de la stratégie en utilisant un modèle Pydantic 
-        combiné dynamiquement à partir des modèles `fixed` et `optimizable`.
-        Lève InvalidStrategyParamsError en cas d'échec de la validation.
+        Valide les paramètres de la stratégie en utilisant un modèle Pydantic combiné.
+        Lève InvalidStrategyParamsError en cas d'échec.
         """
-        # Créer un modèle Pydantic combiné à la volée
         CombinedParamsModel = create_model(
             'CombinedParamsModel',
             __base__=(self.fixed_params_model, self.optimizable_params_model)
         )
 
         try:
-            # Valider l'ensemble des paramètres de l'instance
             CombinedParamsModel(**self.params)
         except ValidationError as e:
-            # Encapsuler l'erreur Pydantic dans une exception personnalisée
+            # --- CORRECTION 2 : APPEL DE L'EXCEPTION ---
+            # Extraire les détails de la première erreur de validation
+            first_error = e.errors()[0]
+            parameter_name = str(first_error.get('loc', ('unknown',))[0])
+            details = first_error.get('msg', 'Validation failed')
+            
+            # Appeler l'exception avec les arguments nommés corrects
             raise InvalidStrategyParamsError(
-                f"Strategy parameter validation failed for {self.__class__.__name__}: {e.errors()}",
-                strategy_name=self.name
+                strategy_name=self.name,
+                parameter_name=parameter_name,
+                details=details,
+                original_exception=e
             ) from e
 
     def get_param(self, key: str, default: Any = None) -> Any:
         return self.params.get(key, default)
         
-    def _prepare_indicator_data(self, data: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"]) -> pd.DataFrame:
-        indicator_freq = self.get_param('indicator_frequency')
-        if not indicator_freq:
-            raise InvalidStrategyParamsError(
-                strategy_name=self.name,
-                parameter_name='indicator_frequency',
-                details="Le paramètre 'indicator_frequency' doit être défini."
-            )
-
+    def _prepare_indicator_data(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame], "EnrichedDataFrame"]) -> pd.DataFrame:
+        """Prépare le DataFrame correct pour le calcul des indicateurs."""
         if isinstance(data, EnrichedDataFrame):
+            indicator_freq = self.get_param('indicator_frequency')
+            if not indicator_freq:
+                raise InvalidStrategyParamsError(
+                    strategy_name=self.name,
+                    parameter_name='indicator_frequency',
+                    details="Le paramètre 'indicator_frequency' est requis pour EnrichedDataFrame."
+                )
             try:
                 logger.debug(f"[{self.name}] Extraction de la vue '{indicator_freq}' depuis EnrichedDataFrame.")
                 return data.get_view(indicator_freq)
@@ -112,7 +120,15 @@ class BaseStrategy(ABC):
                     f"Échec de l'obtention de la vue pour la fréquence '{indicator_freq}'. {e}",
                     strategy_name=self.name, original_exception=e
                 )
+
         elif isinstance(data, dict):
+            indicator_freq = self.get_param('indicator_frequency')
+            if not indicator_freq:
+                raise InvalidStrategyParamsError(
+                    strategy_name=self.name,
+                    parameter_name='indicator_frequency',
+                    details="Le paramètre 'indicator_frequency' est requis pour un dictionnaire de données."
+                )
             logger.debug(f"[{self.name}] Utilisation du DataFrame '{indicator_freq}' depuis le dictionnaire.")
             df = data.get(indicator_freq)
             if df is None or df.empty:
@@ -121,22 +137,27 @@ class BaseStrategy(ABC):
                     strategy_name=self.name
                 )
             return df
+
+        elif isinstance(data, pd.DataFrame):
+            logger.debug(f"[{self.name}] Utilisation du DataFrame simple fourni (contexte de backtest).")
+            return data
+
         else:
             raise StrategyError(f"Type de données non supporté: {type(data)}.", strategy_name=self.name)
             
     @abstractmethod
-    def calculate_indicators(self, data: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"]) -> pd.DataFrame:
+    def calculate_indicators(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame], "EnrichedDataFrame"]) -> pd.DataFrame:
         pass
         
     @abstractmethod
     def generate_signals(self, indicators: pd.DataFrame) -> pd.DataFrame:
         pass
         
-    def execute(self, klines: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"], current_position: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def execute(self, klines: Union[pd.DataFrame, Dict[str, pd.DataFrame], "EnrichedDataFrame"], current_position: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         try:
             indicators_df = self.calculate_indicators(klines)
             if indicators_df is None or not isinstance(indicators_df, pd.DataFrame):
-                 raise StrategyError(f"calculate_indicators pour {self.name} n'a pas retourné un DataFrame valide.", strategy_name=self.name)
+                raise StrategyError(f"calculate_indicators pour {self.name} n'a pas retourné un DataFrame valide.", strategy_name=self.name)
             self._indicators_cache = indicators_df
             signals_df = self.generate_signals(indicators_df)
             self._signals_cache = signals_df
@@ -146,7 +167,7 @@ class BaseStrategy(ABC):
             logger.error(f"Erreur lors de l'exécution de la stratégie {self.name}: {e}", exc_info=True)
             raise StrategyError(f"L'exécution de la stratégie a échoué: {e}", strategy_name=self.name, original_exception=e)
             
-    def _format_signals(self, signals_df: pd.DataFrame, klines_data: Union[Dict[str, pd.DataFrame], "EnrichedDataFrame"], current_position: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def _format_signals(self, signals_df: pd.DataFrame, klines_data: Union[pd.DataFrame, Dict[str, pd.DataFrame], "EnrichedDataFrame"], current_position: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         formatted_signals = []
         execution_tf = Kline.INTERVAL_1MINUTE
         
@@ -154,7 +175,9 @@ class BaseStrategy(ABC):
         try:
             if isinstance(klines_data, EnrichedDataFrame):
                 main_df = klines_data.get_view(execution_tf)
-            else:
+            elif isinstance(klines_data, pd.DataFrame):
+                main_df = klines_data
+            else: # C'est un dictionnaire
                 main_df = klines_data.get(self.get_param('indicator_frequency'))
                 if main_df is None:
                     raise StrategyError("Impossible de déterminer le DataFrame principal pour le formatage.")
@@ -170,7 +193,7 @@ class BaseStrategy(ABC):
             else:
                 logger.warning(f"'signal' manquant dans signals_df pour {self.name}.")
                 return []
-            
+                
         active_signals = signals_df[signals_df[DataFrameCols.SIGNAL.value] != 0].tail(10)
         
         for idx, row in active_signals.iterrows():

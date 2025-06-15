@@ -1,12 +1,20 @@
 # src/backtesting/config.py
-from pydantic import BaseModel, Field
 
-class BacktestConfig(BaseModel):
-    """
-    Defines the backtest environment settings, 
-    which remain constant during an optimization session.
-    """
-    initial_capital: float = Field(default=10000.0, gt=0, description="Initial capital for the backtest.")
-    fees: float = Field(default=0.001, ge=0, description="Trading fees/commission rate per trade.")
-    slippage: float = Field(default=0.0005, ge=0, description="Slippage rate per trade.")
-    leverage: float = Field(default=1.0, gt=0, description="Leverage to apply.")
+"""
+NOTE: Ce fichier est obsolète.
+
+La configuration du backtesting est désormais gérée par le modèle Pydantic `SimulationConfig`
+situé dans le module `src.optimization.config`.
+
+Cette centralisation garantit que les mêmes paramètres de simulation (capital, frais,
+slippage, levier) sont utilisés de manière cohérente à la fois pour les backtests
+simples et pour chaque itération au sein du processus d'optimisation.
+
+Veuillez vous référer à `src.optimization.config.SimulationConfig` pour la structure
+de configuration actuelle.
+"""
+
+# Ce fichier est intentionnellement laissé vide pour marquer la dépréciation.
+# Il pourra être supprimé dans une future version du projet.
+
+pass
