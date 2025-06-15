@@ -19,7 +19,7 @@ from optuna.trial import FrozenTrial, TrialState
 from optuna.study import StudyDirection
 
 # --- Imports Locaux ---
-from src.core.config import settings
+from src.core.config import get_settings
 from src.optimization.config import MainOptimizationConfig, OptunaProfile
 from src.optimization.objective import Objective
 from src.optimization.wfo_engine import WFOSplitGenerator

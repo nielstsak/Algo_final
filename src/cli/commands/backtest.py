@@ -10,7 +10,7 @@ import time
 import asyncio
 from typing import List, Optional, Dict, Any, Union
 
-from src.core.config import settings
+from src.core.config import get_settings
 from src.core.logging_config import setup_logging
 from src.core.exceptions import (
     AlgoBotException, ConfigurationError, DataError,
@@ -28,7 +28,7 @@ from src.backtesting.visualizations import BacktestVisualizer
 # Configuration du logging
 try:
     if not getattr(logger, 'level', None):
-        setup_logging(settings)
+        setup_logging(get_settings())
 except Exception as e:
     print(f"Error setting up logging from backtest CLI: {e}. Using default logger.")
     if not getattr(logger, 'level', None):

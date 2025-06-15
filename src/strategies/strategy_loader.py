@@ -2,12 +2,14 @@
 import importlib
 import inspect
 import os
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Type, Any, Tuple
 from loguru import logger
 
 from src.strategies.base_strategy import BaseStrategy
-from src.core.exceptions import StrategyLoadError, StrategyError, InvalidStrategyParamsError # Added InvalidStrategyParamsError
+from src.strategies.registry import StrategyRegistry
+from src.core.exceptions import StrategyLoadError, StrategyError, InvalidStrategyParamsError
 
 class StrategyLoader:
     """
@@ -127,28 +129,32 @@ class StrategyLoader:
     def _register_strategy(self, strategy_class: Type[BaseStrategy]):
         """
         Enregistre une classe de stratégie.
-        Utilise `strategy_class.name` comme clé.
+        Utilise `strategy_class.name` comme clé et délègue au StrategyRegistry.
         """
         strategy_name_attr = getattr(strategy_class, 'name', None)
         if not strategy_name_attr:
             logger.warning(f"Strategy class {strategy_class.__name__} in module {strategy_class.__module__} is missing 'name' attribute. Skipping registration.")
             return
 
+        # Ancien code pour gérer les conflits de noms - maintenant géré par le registre
         if strategy_name_attr in self.loaded_strategies:
-            # Compare module paths to see if it's genuinely different or just a reload attempt
             existing_class = self.loaded_strategies[strategy_name_attr]
             if existing_class.__module__ != strategy_class.__module__:
                 logger.warning(
                     f"Strategy name '{strategy_name_attr}' from {strategy_class.__module__}.{strategy_class.__name__} "
                     f"conflicts with existing strategy from {existing_class.__module__}.{existing_class.__name__}. Replacing."
                 )
-            elif existing_class != strategy_class: # Same name, same module, different class object (e.g. after reload)
-                 logger.info(f"Reloading/replacing strategy: {strategy_name_attr} from {strategy_class.__module__}")
-            # If it's the exact same class object, no need to do anything or log.
-            else: # Exact same class object, already registered.
+            elif existing_class != strategy_class:
+                logger.info(f"Reloading/replacing strategy: {strategy_name_attr} from {strategy_class.__module__}")
+            else:
                 logger.debug(f"Strategy {strategy_name_attr} from {strategy_class.__module__} already registered with the same class object.")
                 return
-            
+        
+        # Ajouter la stratégie au registre global
+        decorator = StrategyRegistry.register(strategy_name_attr)
+        decorator(strategy_class)
+        
+        # Maintenir également notre dictionnaire local pour la compatibilité
         self.loaded_strategies[strategy_name_attr] = strategy_class
         version_attr = getattr(strategy_class, 'version', 'N/A')
         logger.info(f"Registered strategy: {strategy_name_attr} (v{version_attr}) from {strategy_class.__module__}")
@@ -170,8 +176,24 @@ class StrategyLoader:
     def get_strategy_class(self, name: str) -> Optional[Type[BaseStrategy]]:
         """
         Récupère une classe de stratégie par son nom (attribut `name` de la classe).
+        Utilise en priorité le registre global, puis le chargeur local comme fallback.
         """
-        return self.loaded_strategies.get(name)
+        try:
+            # Essayer d'abord de récupérer depuis le registre global
+            return StrategyRegistry.get_strategy_class(name)
+        except StrategyLoadError:
+            # Si non trouvé dans le registre, tenter le dictionnaire local
+            strategy_class = self.loaded_strategies.get(name)
+            if strategy_class:
+                # Si trouvé localement mais pas dans le registre, l'ajouter au registre
+                warnings.warn(
+                    f"Strategy '{name}' found in local loader but not in global registry. "
+                    f"Adding it to registry for future lookups.",
+                    DeprecationWarning
+                )
+                decorator = StrategyRegistry.register(name)
+                decorator(strategy_class)
+            return strategy_class
         
     def create_strategy(
         self,
@@ -179,29 +201,48 @@ class StrategyLoader:
         params: Optional[Dict[str, Any]] = None,
         **kwargs # Pass other necessary args like pair_symbol, etc.
     ) -> BaseStrategy:
-        strategy_class = self.get_strategy_class(strategy_identifier)
-        
-        if not strategy_class:
-            available = list(self.loaded_strategies.keys())
-            logger.error(f"Strategy '{strategy_identifier}' not found. Available strategies: {available}")
-            raise StrategyLoadError(
-                f"Strategy '{strategy_identifier}' not found. Available: {available}"
-            )
-            
         try:
-            # Ensure all kwargs required by strategy's __init__ (beyond params) are passed
-            instance = strategy_class(params=params, **kwargs) # Pass kwargs here
+            # Utiliser directement la méthode du registre
+            instance = StrategyRegistry.create(strategy_identifier, **kwargs)
             
-            # Optional: garder une référence (peut-être pas nécessaire si CLI gère cycle de vie)
-            # instance_key = f"{strategy_identifier}_{id(instance)}" 
-            # self.strategy_instances[instance_key] = instance 
+            # Appliquer les paramètres si fournis
+            if params:
+                for key, value in params.items():
+                    setattr(instance, key, value)
+                
+            # Mémoriser l'instance si nécessaire
+            # instance_key = f"{strategy_identifier}_{id(instance)}"
+            # self.strategy_instances[instance_key] = instance
             
             logger.debug(f"Created strategy instance: {strategy_identifier}")
             return instance
             
-        except InvalidStrategyParamsError as e: # Catch Pydantic validation errors if params is a model
+        except InvalidStrategyParamsError as e:
             logger.error(f"Invalid parameters for strategy {strategy_identifier}: {e}")
-            raise # Re-raise to be caught by CLI
+            raise
+        except StrategyLoadError as e:
+            # Si échec au niveau du registre, on peut tenter l'ancienne méthode
+            logger.warning(f"Registry failed to create strategy: {e}. Trying legacy method...")
+            
+            strategy_class = self.get_strategy_class(strategy_identifier)
+            if not strategy_class:
+                available = list(self.loaded_strategies.keys())
+                logger.error(f"Strategy '{strategy_identifier}' not found. Available strategies: {available}")
+                raise StrategyLoadError(
+                    f"Strategy '{strategy_identifier}' not found. Available: {available}"
+                )
+                
+            try:
+                instance = strategy_class(params=params, **kwargs)
+                logger.debug(f"Created strategy instance (legacy method): {strategy_identifier}")
+                return instance
+            except Exception as e2:
+                logger.error(f"Failed to create strategy instance (legacy) {strategy_identifier}: {e2}", exc_info=True)
+                raise StrategyError(
+                    f"Cannot instantiate strategy '{strategy_identifier}': {e2}",
+                    strategy_name=strategy_identifier,
+                    original_exception=e2
+                )
         except Exception as e:
             logger.error(f"Failed to create strategy instance {strategy_identifier}: {e}", exc_info=True)
             raise StrategyError(

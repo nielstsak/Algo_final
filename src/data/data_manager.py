@@ -9,7 +9,7 @@ from loguru import logger
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from src.core.config import settings
+from src.core.config import get_settings
 from src.core.constants import Kline, StorageTypes, System
 from src.core.exceptions import (
     DataError,
@@ -35,6 +35,7 @@ class DataManager:
 
     def __init__(self):
         """Initialise les composants du DataManager."""
+        settings = get_settings()
         self.storage_type = settings.data.storage_type
         self.storage: Optional[BaseStorage] = None
         self.kline_processor = KlineProcessor()
@@ -54,6 +55,7 @@ class DataManager:
 
         logger.info("Initializing DataManager components...")
 
+        settings = get_settings()
         if self.storage_type == StorageTypes.PARQUET.value:
             self.storage = ParquetStorage(settings.data.storage_path)
         elif self.storage_type == StorageTypes.POSTGRES.value:

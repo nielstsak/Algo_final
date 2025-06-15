@@ -13,7 +13,7 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
-from src.core.config import settings
+from src.core.config import get_settings
 from src.core.constants import Kline, System
 from src.core.exceptions import (
     ConfigurationError,
@@ -24,7 +24,7 @@ from src.core.exceptions import (
 from src.data.data_manager import DataManager
 
 # --- Gestion des checkpoints ---
-CHECKPOINT_DIR = settings.data.storage_path / ".cli_checkpoints"
+CHECKPOINT_DIR = get_settings().data.storage_path / ".cli_checkpoints"
 
 def get_checkpoint_path(pairs: List[str], interval: str, start_date: Optional[datetime]) -> Path:
     """Génère un nom de fichier de checkpoint basé sur les paramètres de la session."""

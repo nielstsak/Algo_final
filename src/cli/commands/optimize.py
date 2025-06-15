@@ -1,5 +1,4 @@
 # src/cli/commands/optimize.py
-import asyncio
 import click
 import logging
 import yaml
@@ -12,17 +11,17 @@ from src.optimization.optimizer import StrategyOptimizer
 from src.data.data_manager import DataManager
 from src.data.enriched_dataframe import EnrichedDataFrame
 from src.strategies.strategy_loader import StrategyLoader
-from src.core.config import settings
+from src.core.config import get_settings
 from src.core.exceptions import ConfigurationError, OptimizationError, DataError
 
 logger = logging.getLogger(__name__)
 
-async def async_optimize_logic(strategy: str,
-                               symbol_with_slash: str,
-                               config_path: str,
-                               strategies_config_path: str,
-                               output_dir: str):
-    """Logique asynchrone pour l'optimisation."""
+def optimize_logic(strategy: str,
+                  symbol_with_slash: str,
+                  config_path: str,
+                  strategies_config_path: str,
+                  output_dir: str):
+    """Logique synchrone pour l'optimisation."""
     click.echo(f"Lancement de l'optimisation pour la stratégie '{strategy}' sur '{symbol_with_slash}'...")
     
     # Prépare le symbole pour la couche de données (sans '/') et pour l'optimiseur (avec '/').
@@ -44,13 +43,26 @@ async def async_optimize_logic(strategy: str,
     logger.info(f"Classe de la stratégie '{strategy}' chargée avec succès.")
 
     # --- 3. Chargement des données ---
-    async with DataManager() as data_manager:
+    # Note: création et initialisation manuelle du DataManager
+    data_manager = DataManager()
+    
+    # Initialisation synchrone
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(data_manager.initialize())
+    
+    try:
         # Utilise le symbole sans la barre oblique pour charger les données
-        enriched_data = await data_manager.get_enriched_klines(pair=symbol_for_data)
+        enriched_data = loop.run_until_complete(data_manager.get_enriched_klines(pair=symbol_for_data))
         if enriched_data is None:
             raise DataError(f"Impossible de charger les données pour le symbole {symbol_with_slash}.")
         
         logger.info(f"Données chargées pour {symbol_with_slash}. Total de {len(enriched_data.df)} bougies.")
+    finally:
+        # Fermeture propre des ressources
+        loop.run_until_complete(data_manager.close())
+        loop.close()
 
     # --- 4. Initialisation de l'optimiseur ---
     # L'optimiseur utilise le symbole original avec la barre oblique
@@ -116,8 +128,8 @@ def optimize(strategy_name: str,
     en utilisant la configuration fournie.
     """
     try:
-        # Passe le symbole avec la barre oblique à la fonction de logique
-        asyncio.run(async_optimize_logic(strategy_name, symbol, config_path, strategies_config_path, output_dir))
+        # Exécution synchrone de la logique d'optimisation
+        optimize_logic(strategy_name, symbol, config_path, strategies_config_path, output_dir)
     except (ConfigurationError, OptimizationError, FileNotFoundError, DataError) as e:
         logger.error(f"Une erreur de configuration ou d'optimisation est survenue: {e}", exc_info=True)
         click.secho(f"ERREUR: {e}", fg="red")

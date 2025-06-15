@@ -88,7 +88,7 @@ class DatabaseConfigModel(BaseModel):
         raise ValueError(f"Invalid type for pg_port: {type(v)}")
 
 
-    @root_validator(pre=True) 
+    @model_validator(mode='before')
     @classmethod
     def assemble_db_url_if_not_provided(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         if values.get("url"):
@@ -125,9 +125,10 @@ class DatabaseConfigModel(BaseModel):
                     values["url"] = f"sqlite:///{path_obj.resolve().as_posix()}"
         return values
 
-    @validator('url', always=True) 
+    @field_validator('url', mode='after')
     @classmethod
-    def check_db_url_final_state(cls, v: Optional[Union[PostgresDsn, str]], values: Dict[str, Any]) -> Optional[Union[PostgresDsn, str]]:
+    def check_db_url_final_state(cls, v: Optional[Union[PostgresDsn, str]], info) -> Optional[Union[PostgresDsn, str]]:
+        values = info.data
         db_type = values.get('db_type')
         
         if v and isinstance(v, str):
@@ -179,22 +180,22 @@ class DataConfig(BaseModel):
             return (PROJECT_ROOT / v).resolve()
         return v.resolve()
 
-    @root_validator(pre=False, skip_on_failure=True) 
+    @model_validator(mode='after')
     @classmethod
-    def check_export_path_if_enabled(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        if values.get('parquet_export_enabled') and values.get('parquet_export_path') is None:
+    def check_export_path_if_enabled(cls, model) -> 'DataConfig':
+        if model.parquet_export_enabled and model.parquet_export_path is None:
             raise InvalidConfigurationValueError(
                 message="parquet_export_path must be set if parquet_export_enabled is True",
                 parameter="parquet_export_path"
             )
-        return values
+        return model
 
 class TradingConfig(BaseModel):
     mode: Literal['cross_margin'] = "cross_margin"
     base_currency: Literal['USDC', 'USDT', 'BUSD', 'BTC', 'ETH'] = "USDC"
     allowed_pairs: List[str] = Field(default_factory=list) 
 
-    @validator('allowed_pairs', each_item=True) 
+    @field_validator('allowed_pairs', mode='after')
     @classmethod
     def check_pair_format(cls, v: str) -> str:
         # This check is too strict for pairs with "/"
@@ -223,7 +224,7 @@ class MonitoringConfig(BaseModel):
     log_retention: str = "7 days"
     log_compression: Optional[Literal["gz", "bz2", "zip", "xz", "lzma", "tar", "tar.gz", "tar.bz2", "tar.xz"]] = "zip"
 
-    @field_validator('alert_webhook_url', mode='before') 
+    @field_validator('alert_webhook_url')
     @classmethod
     def handle_placeholder_webhook_url(cls, v: Any) -> Optional[Any]:
         if isinstance(v, str) and v == PLACEHOLDER_WEBHOOK_URL:
@@ -284,14 +285,14 @@ class Settings(BaseSettings):
         populate_by_name=True 
     )
 
-    @field_validator('ALERT_WEBHOOK_URL', mode='before') 
+    @field_validator('ALERT_WEBHOOK_URL')
     @classmethod
     def handle_placeholder_top_level_webhook_url(cls, v: Any) -> Optional[Any]:
         if isinstance(v, str) and v == PLACEHOLDER_WEBHOOK_URL:
             return None
         return v
 
-    @root_validator(pre=True) 
+    @model_validator(mode='before')
     @classmethod
     def prepare_nested_model_inputs(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         # --- App Config ---
@@ -407,28 +408,28 @@ class Settings(BaseSettings):
         }
         return values
 
-    @root_validator(pre=False, skip_on_failure=True) 
+    @model_validator(mode='after')
     @classmethod
-    def perform_cross_model_validation(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        binance_cfg: Optional[BinanceConfigModel] = values.get('binance')
+    def perform_cross_model_validation(cls, model) -> 'Settings':
+        binance_cfg = model.binance
         if not binance_cfg or not isinstance(binance_cfg, BinanceConfigModel):
             raise MissingConfigurationError(message="Binance configuration is required.", item="binance")
         if not binance_cfg.api_key or not binance_cfg.api_secret:
               raise MissingConfigurationError(message="Binance api_key and api_secret are required.", item="binance.api_key/api_secret")
 
-        db_config: Optional[DatabaseConfigModel] = values.get('database')
+        db_config = model.database
         if not db_config or not isinstance(db_config, DatabaseConfigModel):
               raise MissingConfigurationError(message="Database configuration is required.", item="database")
-        if not db_config.url and db_config.db_type != "sqlite" and not (db_config.sqlite_path and db_config.sqlite_path == ":memory:"): 
+        if not db_config.url and db_config.db_type != "sqlite" and not (db_config.sqlite_path and db_config.sqlite_path == ":memory:"):
             raise MissingConfigurationError(message=f"{db_config.db_type} URL is missing and could not be constructed.", item="database.url")
 
-        trading_config: Optional[TradingConfig] = values.get('trading')
+        trading_config = model.trading
         if not trading_config or not isinstance(trading_config, TradingConfig):
             raise MissingConfigurationError(message="Trading configuration section is missing or invalid.", item="trading")
-        if not trading_config.allowed_pairs: 
+        if not trading_config.allowed_pairs:
             raise InvalidConfigurationValueError(message="Trading configuration must include at least one pair in 'allowed_pairs'.", parameter="trading.allowed_pairs")
 
-        data_config: Optional[DataConfig] = values.get('data')
+        data_config = model.data
         if data_config and data_config.storage_type == 'postgres':
             if not db_config or db_config.db_type != 'postgresql':
                 raise InvalidConfigurationValueError(
@@ -441,11 +442,11 @@ class Settings(BaseSettings):
                      parameter="database.url"
                  )
         
-        system_config: Optional[SystemConfig] = values.get('system') # NEW
+        system_config = model.system
         if not system_config or not isinstance(system_config, SystemConfig):
             raise MissingConfigurationError(message="System configuration section is missing or invalid.", item="system")
 
-        return values
+        return model
 
 def load_raw_config_from_yaml(config_path: Path) -> Dict[str, Any]:
     if not config_path.exists():
@@ -475,29 +476,47 @@ def load_settings() -> Settings:
         return settings_instance
     except ValidationError as e:
         error_details = []
-        for error in e.errors(include_url=False, include_input=False): 
+        for error in e.errors(include_url=False, include_input=False):
             loc_str = " -> ".join(map(str, error['loc']))
             msg = error['msg']
             error_details.append(f"   - Location: '{loc_str}', Message: '{msg}'")
         error_messages_str = "\n".join(error_details)
         raise ConfigurationError(f"Configuration validation failed:\n{error_messages_str}", original_exception=e)
     except ConfigurationError:
-        raise 
+        raise
     except Exception as e:
         raise ConfigurationError(f"An unexpected error occurred while loading settings: {type(e).__name__} - {e}", original_exception=e)
 
-try:
-    settings: Settings = load_settings()
-    from src.core.logging_config import setup_logging 
-    setup_logging(settings) 
-    logger.info(f"Configuration loaded successfully. Environment: {settings.app.environment}, App Version: {settings.app.version}")
-    if settings.monitoring and settings.monitoring.log_level_console == "DEBUG": # Check monitoring exists
-        logger.debug(f"Full settings loaded (sensitive fields may be masked):\n{settings.model_dump_json(indent=2)}")
-except ConfigurationError as e:
-    print(f"CRITICAL CONFIGURATION ERROR during settings load: {e}")
-    raise
-except Exception as e: # Catch any other exception during setup
-    print(f"CRITICAL UNHANDLED ERROR during settings load or logging setup: {type(e).__name__} - {e}")
-    import traceback
-    traceback.print_exc()
-    raise
+# Singleton pattern for settings
+_settings_instance = None
+
+def get_settings() -> Settings:
+    """
+    Get the settings instance (singleton pattern).
+    If the settings haven't been loaded yet, load them.
+    
+    Returns:
+        Settings: The application settings
+    """
+    global _settings_instance
+    if _settings_instance is None:
+        try:
+            _settings_instance = load_settings()
+            from src.core.logging_config import setup_logging
+            setup_logging(_settings_instance)
+            logger.info(f"Configuration loaded successfully. Environment: {_settings_instance.app.environment}, App Version: {_settings_instance.app.version}")
+            if _settings_instance.monitoring and _settings_instance.monitoring.log_level_console == "DEBUG":
+                logger.debug(f"Full settings loaded (sensitive fields may be masked):\n{_settings_instance.model_dump_json(indent=2)}")
+        except ConfigurationError as e:
+            print(f"CRITICAL CONFIGURATION ERROR during settings load: {e}")
+            raise
+        except Exception as e:
+            print(f"CRITICAL UNHANDLED ERROR during settings load or logging setup: {type(e).__name__} - {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+    return _settings_instance
+
+# For backward compatibility during transition
+# This will be deprecated soon - import get_settings() instead
+settings = get_settings()

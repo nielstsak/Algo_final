@@ -9,6 +9,7 @@ from src.core.exceptions import SignalGenerationError
 from src.strategies.params import BaseFixedParams, BaseOptimizableParams
 from src.data.enriched_dataframe import EnrichedDataFrame
 from src.strategies import technical_indicators as ti
+from src.strategies.registry import StrategyRegistry
 
 class SMACrossFixedParams(BaseFixedParams):
     indicator_frequency: str = Field(default='1h', description="Fréquence pour le calcul des indicateurs.")
@@ -26,6 +27,7 @@ class SMACrossOptimizableParams(BaseOptimizableParams):
             raise ValueError("fast_period doit être inférieur à slow_period.")
         return self
 
+@StrategyRegistry.register("SMACrossStrategy")
 class SMACrossStrategy(BaseStrategy):
     name: str = "SMACrossStrategy"
     version: str = "3.5.0" # Version mise à jour
