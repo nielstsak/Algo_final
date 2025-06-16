@@ -14,7 +14,8 @@ from pydantic import (
     root_validator, # model_validator is preferred in Pydantic V2
     ValidationError,
     PostgresDsn,
-    field_validator # Added for Pydantic V2 style
+    field_validator, # Added for Pydantic V2 style
+    model_validator # Added for Pydantic V2 style
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_core import PydanticCustomError
@@ -28,6 +29,7 @@ from src.core.exceptions import (
     MissingConfigurationError
 )
 
+from src.utils.exchange_utils import normalize_pair_list, normalize_pair_symbol
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # --- CORRECTION ---
 # Le chemin pointe maintenant vers le dossier /configs/
@@ -195,18 +197,32 @@ class TradingConfig(BaseModel):
     base_currency: Literal['USDC', 'USDT', 'BUSD', 'BTC', 'ETH'] = "USDC"
     allowed_pairs: List[str] = Field(default_factory=list) 
 
-    @field_validator('allowed_pairs', mode='after')
+    @field_validator('allowed_pairs', mode='before')
     @classmethod
-    def check_pair_format(cls, v: str) -> str:
-        # This check is too strict for pairs with "/"
-        # A better check would be to see if it matches a regex or just ensure it's a string.
-        # For now, let's relax it slightly. The main validation is that the list is not empty.
-        if not isinstance(v, str) or len(v) < 6:
-             raise InvalidConfigurationValueError(
-                 message=f"Trading pair '{v}' format is invalid. Expected a string like 'BTC/USDT'.",
-                 parameter="allowed_pairs", value=v
-             )
-        return v.replace("/", "") # Standardize to a format without slashes internally if needed
+    def normalize_and_validate_allowed_pairs(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            raise InvalidConfigurationValueError(
+                message="allowed_pairs must be a list.",
+                parameter="allowed_pairs", value=v
+            )
+        if not v: # Empty list is allowed by default_factory
+            return []
+
+        processed_pairs = []
+        for pair_str in v:
+            if not isinstance(pair_str, str):
+                raise InvalidConfigurationValueError(
+                    message=f"Each item in allowed_pairs must be a string. Got: {pair_str}",
+                    parameter="allowed_pairs", value=pair_str
+                )
+            normalized = normalize_pair_symbol(pair_str) # Use utility function
+            if len(normalized) < 4: # Basic sanity check like BTCUSD
+                 raise InvalidConfigurationValueError(
+                     message=f"Trading pair '{pair_str}' (normalized: '{normalized}') format is invalid or too short.",
+                     parameter="allowed_pairs", value=pair_str
+                 )
+            processed_pairs.append(normalized)
+        return processed_pairs
 
 class RiskConfig(BaseModel):
     max_position_pct: float = Field(0.1, gt=0, le=1)
@@ -356,15 +372,18 @@ class Settings(BaseSettings):
                     # Attempt to parse as JSON list first
                     parsed_env_pairs = json.loads(env_pairs_str)
                     if isinstance(parsed_env_pairs, list):
-                        allowed_pairs_final = parsed_env_pairs
+                        allowed_pairs_final = normalize_pair_list(parsed_env_pairs)
                     else: # If not a list, treat as comma-separated string
-                        allowed_pairs_final = [p.strip().upper() for p in env_pairs_str.split(',') if p.strip()]
+                        raw_list = [p.strip() for p in env_pairs_str.split(',') if p.strip()]
+                        allowed_pairs_final = normalize_pair_list(raw_list)
                 except json.JSONDecodeError: # If not JSON, treat as comma-separated string
-                    allowed_pairs_final = [p.strip().upper() for p in env_pairs_str.split(',') if p.strip()]
+                    raw_list = [p.strip() for p in env_pairs_str.split(',') if p.strip()]
+                    allowed_pairs_final = normalize_pair_list(raw_list)
             elif isinstance(env_pairs_str, list): # Already a list (e.g. from default_factory if env var not set)
-                 allowed_pairs_final = env_pairs_str
-
-        elif not allowed_pairs_final: 
+                 allowed_pairs_final = normalize_pair_list(env_pairs_str)
+        elif allowed_pairs_final is not None: # From YAML
+            allowed_pairs_final = normalize_pair_list(allowed_pairs_final)
+        else: # Default factory
               allowed_pairs_final = TradingConfig.model_fields['allowed_pairs'].default_factory()
 
         values['trading'] = {

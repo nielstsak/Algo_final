@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from pydantic import Field
+import numpy as np
 
 from src.strategies.base_strategy import BaseStrategy
 from src.core.exceptions import SignalGenerationError

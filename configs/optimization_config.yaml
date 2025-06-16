@@ -18,7 +18,9 @@ simulation_config:
   # method: 'PERCENTAGE' ou 'FIXED_PER_TRADE'
   fee_config:
     method: 'PERCENTAGE'
-    value: 0.0075 # Correspond à 0.1%
+    # CORRECTION: La valeur 0.0075 correspond à 0.75%. 
+    # Pour 0.1%, utiliser 0.001. Pour 0.075%, utiliser 0.00075.
+    value: 0.001 # Exemple: ajusté pour correspondre à 0.1% de frais
 
   # Configuration du modèle de slippage (glissement de prix).
   # method: 'PERCENTAGE', 'FIXED_PER_TRADE', ou 'VOLATILITY_ADJUSTED'
@@ -78,8 +80,8 @@ optuna_config:
   pareto_selection:
     strategy: 'COMPOSITE_SCORE'
     weights:
-      sharpe_ratio: 1.5
-      max_drawdown: -1.0 # Poids négatif car on minimise
+      sharpe_ratio: 1.0 # Ajusté pour correspondre aux objectifs
+      general_total_net_pnl: 0.5 # Utiliser la métrique correcte et ajuster le poids
 
   # Paramètres avancés et optionnels
   sampler_params:

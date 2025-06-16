@@ -1,135 +1,154 @@
-# tests/test_backtest_strategies.py
 import pytest
 import pandas as pd
 import numpy as np
-from typing import Dict, Any
 
+# Importer la stratégie à tester
 from src.strategies.implementations.bbands_volume_rsi_strategy_impl import BbandsVolumeRsiStrategy
-from src.backtesting.vectorbt_engine import VectorBTEngine
-from src.strategies.strategy_loader import StrategyLoader
 
-@pytest.fixture(scope="module")
-def backtest_engine() -> VectorBTEngine:
-    """Fixture to create a VectorBTEngine instance for tests."""
-    return VectorBTEngine(
-        initial_capital=10000.0,
-        commission=0.001,
-        slippage=0.0005,
-        freq='1h' # La fréquence du backtest
-    )
-
-@pytest.fixture(scope="module")
-def bbands_strategy_instance() -> BbandsVolumeRsiStrategy:
-    """Fixture to create an instance of the BbandsVolumeRsiStrategy."""
-    loader = StrategyLoader()
-    params = {
-        'indicator_frequency': '1h',
-        'rsi_buy_breakout_threshold': 60.0,
-        'bbands_period': 20,
-        'bbands_std_dev': 2.0,
-        'volume_ma_period': 20,
-        'rsi_period': 14,
-        'atr_period_sl_tp': 14,
-        'sl_atr_mult': 1.5,
-        'tp_atr_mult': 2.0,
+@pytest.fixture
+def bbands_breakout_strategy_params():
+    """
+    Fournit un jeu de paramètres par défaut et valides pour la stratégie
+    BbandsVolumeRsiStrategy version "breakout".
+    """
+    return {
+        "bbands_period": 5,
+        "bbands_std_dev": 2.0,
+        "volume_ma_period": 5,
+        "rsi_period": 5,
+        "rsi_buy_breakout_threshold": 60,
+        "rsi_sell_breakout_threshold": 40,
+        "atr_period": 5,
+        "sl_atr_mult": 1.5,
+        "tp_atr_mult": 3.0,
     }
-    return loader.create_strategy("BbandsVolumeRsiStrategy", params=params, pair_symbol="TESTBTCUSDC")
 
 
-def create_test_data_for_bbands_long_signal() -> pd.DataFrame:
+def test_bbands_volume_rsi_breakout_long_signal(bbands_breakout_strategy_params):
     """
-    Crée un DataFrame avec des données conçues pour déclencher un signal d'achat
-    UNIQUEMENT sur l'avant-dernière ligne, en s'assurant que le trade n'est pas immédiatement clôturé.
+    Vérifie que la stratégie génère correctement un signal d'achat (long)
+    lorsque toutes les conditions de cassure haussière sont remplies pour la première fois.
+    Valide également le calcul du SL/TP.
     """
-    periods = 51
-    dates = pd.date_range(start="2023-01-01", periods=periods, freq='h', tz='UTC')
-
-    # Données de base "inertes" qui ne déclencheront aucun signal
-    base_price = 100.0
+    # Création de données de test spécifiques pour déclencher un signal long
     data = {
-        'open': np.full(periods, base_price),
-        'high': np.full(periods, base_price + 2.0),
-        'low': np.full(periods, base_price - 2.0),
-        'close': np.full(periods, base_price),
-        'volume': np.full(periods, 80.0),
-        'BB_UPPER_1h_p20_sd2.0': np.full(periods, base_price + 5.0),
-        'BB_LOWER_1h_p20_sd2.0': np.full(periods, base_price - 5.0),
-        'RSI_1h_p14': np.full(periods, 50.0),
-        'Volume_MA_1h_p20': np.full(periods, 100.0),
-        'ATR_1h_p14': np.full(periods, 1.0)
+        'open':  [100, 101, 102, 103, 104, 105],
+        'high':  [101, 102, 103, 104, 110, 106], # High à 110 pour la bougie du signal
+        'low':   [99,  100, 101, 102, 103, 104],
+        'close': [101, 102, 103, 104, 108, 105], # Close à 108 pour la bougie du signal
+        'volume':[100, 110, 120, 130, 200, 150], # Volume à 200 pour la bougie du signal
     }
-    df = pd.DataFrame(data, index=dates)
+    test_df = pd.DataFrame(data)
 
-    # --- Étape 1: Assurer que la bougie AVANT le signal est neutre ---
-    # Les données de base s'en chargent déjà, mais on peut être explicite.
-    prev_signal_bar_idx = df.index[-3]
-    df.loc[prev_signal_bar_idx, ['close', 'RSI_1h_p14', 'volume']] = [base_price, 50.0, 80.0]
-
-
-    # --- Étape 2: Créer chirurgicalement la condition de signal à l'avant-dernière bougie ---
-    signal_bar_idx = df.index[-2]
-    # Forcer les 3 conditions à être vraies
-    df.loc[signal_bar_idx, 'close'] = 106.0  # close (106) > BB_UPPER (105)
-    df.loc[signal_bar_idx, 'volume'] = 110.0  # volume (110) > Volume_MA (100)
-    df.loc[signal_bar_idx, 'RSI_1h_p14'] = 65.0   # RSI (65) > seuil (60)
-
-    # --- Étape 3: Configurer la bougie d'entrée (la dernière) pour que le trade ne soit pas clôturé ---
-    entry_bar_idx = df.index[-1]
+    # Instanciation de la stratégie avec les paramètres de test
+    strategy = BbandsVolumeRsiStrategy(bbands_breakout_strategy_params)
     
-    # Calculer le SL/TP basé sur les données de la bougie de signal
-    entry_price_ref = df.loc[signal_bar_idx, 'close']  # 106.0
-    atr_val = df.loc[signal_bar_idx, 'ATR_1h_p14']      # 1.0
-    sl_atr_mult = 1.5
-    tp_atr_mult = 2.0
-    stop_loss_price = entry_price_ref - (sl_atr_mult * atr_val)    # 106.0 - 1.5 = 104.5
-    take_profit_price = entry_price_ref + (tp_atr_mult * atr_val)  # 106.0 + 2.0 = 108.0
+    # Remplacer les indicateurs calculés par des valeurs contrôlées pour le test
+    # On force les conditions à être vraies uniquement à l'index 4
+    strategy.indicators_df = test_df.copy()
+    strategy.indicators_df['bb_upper'] =    [102, 103, 104, 105, 106, 107] # close (108) > bb_upper (106)
+    strategy.indicators_df['bb_lower'] =    [98,  99,  100, 101, 102, 103]
+    strategy.indicators_df['bb_middle'] =   [100, 101, 102, 103, 104, 105]
+    strategy.indicators_df['volume_ma'] =   [105, 115, 125, 135, 140, 155] # volume (200) > volume_ma (140)
+    strategy.indicators_df['rsi'] =         [50,  55,  58,  59,  65,  61] # rsi (65) > threshold (60)
+    strategy.indicators_df['atr'] =         [1.0, 1.2, 1.1, 1.3, 2.0, 1.8] # atr = 2.0 pour le calcul SL/TP
 
-    # L'entrée se fait au 'open' de la bougie suivante.
-    # On s'assure que le 'high' et le 'low' de cette bougie sont dans les limites SL/TP.
-    df.loc[entry_bar_idx, 'open'] = 106.1  # Prix d'entrée
-    df.loc[entry_bar_idx, 'high'] = take_profit_price - 0.1  # 107.9 (inférieur au TP)
-    df.loc[entry_bar_idx, 'low'] = stop_loss_price + 0.1    # 104.6 (supérieur au SL)
-    df.loc[entry_bar_idx, 'close'] = 107.0 # La clôture peut être n'importe où entre low et high
+    # Génération des signaux
+    strategy.generate_signals(test_df)
+    signals = strategy.get_signals()
+    
+    # --- Assertions ---
+    # 1. Vérifier qu'un seul signal d'entrée long a été généré à l'index 4
+    assert signals['entry_long'].sum() == 1
+    assert signals.loc[4, 'entry_long'] is True
+    
+    # 2. Vérifier qu'aucun autre type de signal n'a été généré
+    assert signals['entry_short'].sum() == 0
+    assert signals['exit_long'].sum() == 0
+    assert signals['exit_short'].sum() == 0
 
-    return df
+    # 3. Vérifier le calcul du SL et TP à l'index 4
+    expected_sl = 108 - (2.0 * 1.5)  # close - (atr * sl_mult)
+    expected_tp = 108 + (2.0 * 3.0)  # close + (atr * tp_mult)
+    assert np.isclose(signals.loc[4, 'sl'], expected_sl)
+    assert np.isclose(signals.loc[4, 'tp'], expected_tp)
+    
+    # 4. Vérifier que SL et TP sont NaN partout ailleurs
+    assert signals['sl'].drop(index=4).isnull().all()
+    assert signals['tp'].drop(index=4).isnull().all()
 
 
-def test_signal_generation_and_backtest_execution(
-    backtest_engine: VectorBTEngine, 
-    bbands_strategy_instance: BbandsVolumeRsiStrategy
-):
+def test_bbands_volume_rsi_breakout_short_signal(bbands_breakout_strategy_params):
     """
-    Vérifie que la stratégie génère un signal et que le backtest exécute un trade.
+    Vérifie que la stratégie génère correctement un signal de vente (short)
+    lorsque toutes les conditions de cassure baissière sont remplies pour la première fois.
+    Valide également le calcul du SL/TP.
     """
-    # 1. Préparer les données de test
-    test_data_df = create_test_data_for_bbands_long_signal()
+    # Création de données de test spécifiques pour déclencher un signal short
+    data = {
+        'open':  [105, 104, 103, 102, 101, 100],
+        'high':  [106, 105, 104, 103, 102, 101],
+        'low':   [104, 103, 102, 101, 95,  99], # Low à 95 pour la bougie du signal
+        'close': [104, 103, 102, 101, 97,  100], # Close à 97 pour la bougie du signal
+        'volume':[100, 110, 120, 130, 200, 150], # Volume à 200 pour la bougie du signal
+    }
+    test_df = pd.DataFrame(data)
+
+    strategy = BbandsVolumeRsiStrategy(bbands_breakout_strategy_params)
     
-    # 2. Générer les signaux
-    indicators_dict = {'1h': test_data_df}
-    signals_df = bbands_strategy_instance.generate_signals(indicators_dict)
+    # Remplacer les indicateurs par des valeurs contrôlées
+    # Conditions vraies uniquement à l'index 4
+    strategy.indicators_df = test_df.copy()
+    strategy.indicators_df['bb_upper'] =    [106, 105, 104, 103, 102, 101]
+    strategy.indicators_df['bb_lower'] =    [102, 101, 100, 99,  98,  99] # close (97) < bb_lower (98)
+    strategy.indicators_df['bb_middle'] =   [104, 103, 102, 101, 100, 100]
+    strategy.indicators_df['volume_ma'] =   [105, 115, 125, 135, 140, 155] # volume (200) > volume_ma (140)
+    strategy.indicators_df['rsi'] =         [50,  45,  42,  41,  35,  39] # rsi (35) < threshold (40)
+    strategy.indicators_df['atr'] =         [1.0, 1.2, 1.1, 1.3, 2.0, 1.8] # atr = 2.0
 
-    # 3. Vérifier que le signal d'achat est généré sur l'avant-dernière ligne
-    assert signals_df is not None
-    assert not signals_df.empty
-    assert signals_df['entry_long'].iloc[-2] == True, "Un signal d'achat (entry_long) était attendu sur l'avant-dernière bougie."
-    assert signals_df['entry_long'].sum() == 1, "Un seul signal d'achat était attendu dans ce jeu de test."
-    assert pd.notna(signals_df['sl'].iloc[-2]), "Le stop loss devrait être défini pour le signal d'entrée."
-    assert pd.notna(signals_df['tp'].iloc[-2]), "Le take profit devrait être défini pour le signal d'entrée."
-
-    # 4. Exécuter le backtest
-    portfolio = backtest_engine.run_backtest(
-        data=test_data_df, 
-        signals=signals_df,
-        symbol="TESTBTCUSDC"
-    )
-
-    # 5. Vérifier le résultat du backtest
-    assert portfolio is not None, "Le portefeuille retourné par le backtest ne devrait pas être None."
+    # Génération des signaux
+    strategy.generate_signals(test_df)
+    signals = strategy.get_signals()
     
-    num_trades = portfolio.trades.count()
-    assert num_trades > 0, f"Le backtest n'a exécuté aucun trade, mais un signal a été généré. Trades exécutés: {num_trades}"
-    assert num_trades == 1, "Exactement un trade aurait dû être exécuté."
+    # --- Assertions ---
+    # 1. Un seul signal d'entrée short à l'index 4
+    assert signals['entry_short'].sum() == 1
+    assert signals.loc[4, 'entry_short'] is True
     
-    print("\nTest de workflow de backtest réussi : signal généré et trade exécuté.")
-    print(f"Stats du trade: {portfolio.trades.records_readable}")
+    # 2. Aucun autre signal
+    assert signals['entry_long'].sum() == 0
+    assert signals['exit_long'].sum() == 0
+    assert signals['exit_short'].sum() == 0
 
+    # 3. Calcul correct du SL/TP pour une position short
+    expected_sl = 97 + (2.0 * 1.5)  # close + (atr * sl_mult)
+    expected_tp = 97 - (2.0 * 3.0)  # close - (atr * tp_mult)
+    assert np.isclose(signals.loc[4, 'sl'], expected_sl)
+    assert np.isclose(signals.loc[4, 'tp'], expected_tp)
+    
+    # 4. SL/TP sont NaN partout ailleurs
+    assert signals['sl'].drop(index=4).isnull().all()
+    assert signals['tp'].drop(index=4).isnull().all()
+
+
+def test_bbands_volume_rsi_no_signal(bbands_breakout_strategy_params):
+    """
+    Vérifie que la stratégie ne génère aucun signal si les conditions
+    ne sont jamais toutes remplies simultanément.
+    """
+    data = {
+        'open':  [100, 101, 102, 103, 104, 105],
+        'high':  [101, 102, 103, 104, 105, 106],
+        'low':   [99,  100, 101, 102, 103, 104],
+        'close': [101, 102, 103, 104, 105, 105],
+        'volume':[100, 110, 120, 130, 140, 150],
+    }
+    test_df = pd.DataFrame(data)
+
+    strategy = BbandsVolumeRsiStrategy(bbands_breakout_strategy_params)
+    strategy.generate_signals(test_df)
+    signals = strategy.get_signals()
+
+    # Assertion : Aucun signal d'entrée ne doit être généré
+    assert signals['entry_long'].sum() == 0
+    assert signals['entry_short'].sum() == 0

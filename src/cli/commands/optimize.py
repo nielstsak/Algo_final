@@ -13,6 +13,7 @@ from src.data.enriched_dataframe import EnrichedDataFrame
 from src.strategies.strategy_loader import StrategyLoader
 from src.core.config import get_settings
 from src.core.exceptions import ConfigurationError, OptimizationError, DataError
+from src.utils.exchange_utils import normalize_pair_symbol
 
 logger = logging.getLogger(__name__)
 

@@ -207,6 +207,11 @@ class StrategyOptimizer:
             is_df = self.data.df.loc[is_indices]
             oos_df = self.data.df.loc[oos_indices]
 
+            if is_df.empty:
+                logger.warning(f"WFO Split {i+1}: Les données In-Sample sont vides après le découpage avec is_indices (longueur: {len(is_indices)}). "
+                               f"Début IS: {is_indices.min() if not is_indices.empty else 'N/A'}, Fin IS: {is_indices.max() if not is_indices.empty else 'N/A'}. "
+                               "Ce split sera ignoré.")
+                continue
             logger.info(f"Optimisation In-Sample sur {len(is_df)} points...")
             is_study = self._run_optimization_on_period(is_df, f"IS-split{i+1}")
 
@@ -246,6 +251,11 @@ class StrategyOptimizer:
     def _run_simple_optimization(self) -> Tuple[FrozenTrial, optuna.Study]:
         logger.info("Démarrage d'une optimisation simple sur l'ensemble des données.")
         data_for_opt = self.data.df
+
+        if data_for_opt.empty:
+            logger.error("Les données pour l'optimisation simple sont vides. Impossible de continuer.")
+            # Vous pourriez vouloir retourner une structure indiquant l'échec ou lever une exception plus spécifique.
+            raise OptimizationError("Les données d'entrée pour l'optimisation simple sont vides.")
 
         study = self._run_optimization_on_period(data_for_opt, "full-period")
         best_trial = self._select_best_trial(study)

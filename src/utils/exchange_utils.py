@@ -319,6 +319,20 @@ async def get_symbol_info_model_for_tests(symbol: str) -> Optional[SymbolInfo]:
             return None
     return None
 
+def normalize_pair_symbol(pair_symbol: str) -> str:
+    """Converts a pair symbol to a standardized format (uppercase, no slash)."""
+    if not isinstance(pair_symbol, str):
+        # Or raise ValueError, depending on desired strictness
+        logger.warning(f"Attempted to normalize non-string pair symbol: {pair_symbol}. Returning as is.")
+        return pair_symbol
+    return pair_symbol.replace('/', '').upper().strip()
+
+def normalize_pair_list(pairs: List[str]) -> List[str]:
+    """Normalizes a list of pair symbols."""
+    if not isinstance(pairs, list):
+        logger.warning(f"Attempted to normalize non-list: {pairs} for pair list. Returning empty list.")
+        return []
+    return [normalize_pair_symbol(p) for p in pairs]
 
 if __name__ == '__main__':
     async def main_tests_exchange_utils():

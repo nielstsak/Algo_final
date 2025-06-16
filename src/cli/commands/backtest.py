@@ -24,6 +24,7 @@ from src.strategies.base_strategy import BaseStrategy
 from src.backtesting.vectorbt_engine import VectorBTEngine
 from src.backtesting.performance_metrics import PerformanceMetrics
 from src.backtesting.visualizations import BacktestVisualizer
+from src.utils.exchange_utils import normalize_pair_symbol
 
 # Configuration du logging
 try:
@@ -43,7 +44,7 @@ class CommaSeparatedPairs(click.ParamType):
         if isinstance(value, list):
             return value
         if isinstance(value, str):
-            pairs = [p.strip().upper() for p in value.split(',') if p.strip()]
+            pairs = [normalize_pair_symbol(p) for p in value.split(',') if p.strip()] # Use utility
             if not pairs:
                 self.fail(f"'{value}' is not a valid comma-separated list of pairs.", param, ctx)
             return pairs

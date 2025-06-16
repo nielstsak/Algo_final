@@ -416,13 +416,17 @@ class PerformanceMetrics:
                 else:
                     metrics[f"vbt_{k.replace(' ', '_').lower()}"] = v
         except Exception as e:
-            pass
+            # Log the error if portfolio.stats() or its processing fails
+            logger.warning(f"Could not retrieve or process portfolio.stats(): {e}", exc_info=True)
 
         metrics['returns'] = {
             "total_return_pct": PerformanceMetrics.total_return(portfolio) * 100,
             "annualized_return_pct": PerformanceMetrics.annualized_return(portfolio) * 100,
         }
-
+        
+        # S'assurer que benchmark_returns est une Series valide avant de l'utiliser
+        valid_benchmark_returns = benchmark_returns if isinstance(benchmark_returns, pd.Series) and not benchmark_returns.empty else None
+        
         metrics['risk_ratios'] = {
             "sharpe_ratio": PerformanceMetrics.sharpe_ratio(portfolio, risk_free_rate_annual),
             "sortino_ratio": PerformanceMetrics.sortino_ratio(portfolio, risk_free_rate_annual),
@@ -430,11 +434,11 @@ class PerformanceMetrics:
             "information_ratio": PerformanceMetrics.information_ratio(portfolio, benchmark_returns) if benchmark_returns is not None else np.nan,
         }
 
-        mdd_duration = PerformanceMetrics.max_drawdown_duration(portfolio)
+        mdd_duration_val = PerformanceMetrics.max_drawdown_duration(portfolio)
         recovery_t = PerformanceMetrics.recovery_time(portfolio)
         metrics['drawdown'] = {
             "max_drawdown_pct": PerformanceMetrics.max_drawdown(portfolio) * 100,
-            "max_drawdown_duration_days": mdd_duration.days if isinstance(mdd_duration, pd.Timedelta) else mdd_duration,
+            "max_drawdown_duration_days": mdd_duration_val.days if isinstance(mdd_duration_val, pd.Timedelta) else mdd_duration_val,
             "average_recovery_time_days": recovery_t.days if recovery_t else np.nan,
         }
 
@@ -482,14 +486,27 @@ class PerformanceMetrics:
             else:
                 flat_metrics[category] = cat_metrics
         
-        flat_metrics['general_start_date'] = portfolio.wrapper.index[0]
-        flat_metrics['general_end_date'] = portfolio.wrapper.index[-1]
-        flat_metrics['general_duration_days'] = (portfolio.wrapper.index[-1] - portfolio.wrapper.index[0]).days
+        # --- Safely access portfolio attributes ---
+        if portfolio.wrapper.index is not None and not portfolio.wrapper.index.empty:
+            flat_metrics['general_start_date'] = portfolio.wrapper.index[0]
+            flat_metrics['general_end_date'] = portfolio.wrapper.index[-1]
+            flat_metrics['general_duration_days'] = (portfolio.wrapper.index[-1] - portfolio.wrapper.index[0]).days
+        else:
+            logger.warning("Portfolio wrapper index is empty or None. General date metrics will be NaT/NaN.")
+            flat_metrics['general_start_date'] = pd.NaT
+            flat_metrics['general_end_date'] = pd.NaT
+            flat_metrics['general_duration_days'] = np.nan
+
         flat_metrics['general_initial_capital'] = portfolio.init_cash
-        flat_metrics['general_final_value'] = portfolio.value().iloc[-1]
-        # --- CORRECTION: Ajout de la métrique PnL nette totale ---
-        flat_metrics['general_total_net_pnl'] = portfolio.value().iloc[-1] - portfolio.init_cash
-        # --- FIN DE LA CORRECTION ---
+        
+        portfolio_values = portfolio.value() # Get it once
+        if portfolio_values is not None and not portfolio_values.empty:
+            flat_metrics['general_final_value'] = portfolio_values.iloc[-1]
+            flat_metrics['general_total_net_pnl'] = portfolio_values.iloc[-1] - portfolio.init_cash
+        else:
+            logger.warning("Portfolio value series is empty or None. Final value and PnL metrics will be NaN.")
+            flat_metrics['general_final_value'] = np.nan
+            flat_metrics['general_total_net_pnl'] = np.nan
         
         return flat_metrics
 

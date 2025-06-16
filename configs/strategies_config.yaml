@@ -1,148 +1,180 @@
-strategies:
-  SMACrossStrategy:
-    optimizable_params:
-      indicator_frequency:
-        type: "categorical"
-        choices: ['5m', '15m', '30m', '1h', '4h']
-      fast_period:
-        type: "int"
-        low: 5
-        high: 20
-        step: 2
-      slow_period:
-        type: "int"
-        low: 25
-        high: 60
-        step: 5
-      stop_loss_pct:
-        type: "float"
-        low: 0.01
-        high: 0.05
-        step: 0.005
-      take_profit_pct:
-        type: "float"
-        low: 0.02
-        high: 0.10
-        step: 0.01
-    fixed_params:
-      position_sizing_pct_capital: 0.02
+# --- Configuration des stratégies de trading ---
+# Ce fichier centralise les paramètres par défaut et les espaces d'optimisation
+# pour chaque stratégie de trading implémentée dans le système.
+#
+# Structure par stratégie :
+# StrategyClassName:
+#   display_name: "Nom lisible pour l'interface utilisateur"
+#   description: "Description courte de la logique de la stratégie."
+#   params:
+#     # Paramètres par défaut utilisés pour les backtests simples ou le trading live.
+#     # Doivent correspondre exactement aux champs du modèle Pydantic associé.
+#     param_name_1: value1
+#     param_name_2: value2
+#   optimization_space:
+#     # Espace de recherche pour l'optimisation des hyperparamètres (via Optuna).
+#     # 'type' peut être 'int', 'float', ou 'categorical'.
+#     # 'low' et 'high' définissent la plage pour 'int' et 'float'.
+#     # 'step' définit le pas d'incrémentation pour 'int' et 'float'.
+#     # 'choices' liste les options pour 'categorical'.
+#     param_name_1:
+#       type: 'int'
+#       low: 10
+#       high: 50
+#       step: 1
 
-  PsarReversalOtocoStrategy:
-    optimizable_params:
-      indicator_frequency:
-        type: "categorical"
-        choices: ['5m', '15m', '30m', '1h', '4h']
-      psar_inc:
-        type: "float"
-        low: 0.01
-        high: 0.05
-        step: 0.01
-      psar_max:
-        type: "float"
-        low: 0.1
-        high: 0.3
-        step: 0.05
-      atr_period:
-        type: "int"
-        low: 10
-        high: 20
-        step: 2
-      atr_multiplier_sl:
-        type: "float"
-        low: 1.5
-        high: 3.0
-        step: 0.25
-      atr_multiplier_tp:
-        type: "float"
-        low: 2.0
-        high: 5.0
-        step: 0.5
-      otoco_candle_body_ratio_thld:
-        type: "float"
-        low: 0.6
-        high: 0.9
-        step: 0.05
-      otoco_wick_ratio_thld:
-        type: "float"
-        low: 0.05
-        high: 0.2
-        step: 0.01
-    fixed_params:
-      position_sizing_pct_capital: 0.8
+SMACrossStrategy:
+  display_name: "Simple Moving Average Cross"
+  description: "Stratégie de base qui génère des signaux d'achat/vente lors du croisement de deux moyennes mobiles (rapide et lente)."
+  params:
+    fast_ma: 10
+    slow_ma: 30
+    stop_loss_pct: 0.05
+    take_profit_pct: 0.1
+  optimization_space:
+    fast_ma:
+      type: 'int'
+      low: 5
+      high: 50
+      step: 1
+    slow_ma:
+      type: 'int'
+      low: 20
+      high: 200
+      step: 5
+    stop_loss_pct:
+      type: 'float'
+      low: 0.01
+      high: 0.1
+      step: 0.01
+    take_profit_pct:
+      type: 'float'
+      low: 0.02
+      high: 0.2
+      step: 0.01
 
-  BbandsVolumeRsiStrategy:
-    optimizable_params:
-      indicator_frequency:
-        type: "categorical"
-        choices: ['5m', '15m', '30m', '1h', '4h']
-      bb_period:
-        type: "int"
-        low: 15
-        high: 30
-        step: 1
-      bb_std_dev:
-        type: "float"
-        low: 1.5
-        high: 2.5
-        step: 0.1
-      rsi_period:
-        type: "int"
-        low: 7
-        high: 21
-        step: 1
-      rsi_overbought:
-        type: "int"
-        low: 65
-        high: 80
-        step: 1
-      rsi_oversold:
-        type: "int"
-        low: 20
-        high: 35
-        step: 1
-      volume_factor:
-        type: "float"
-        low: 1.0
-        high: 2.5
-        step: 0.1
-      volume_period:
-        type: "int"
-        low: 15
-        high: 30
-        step: 1
-    fixed_params:
-      position_sizing_pct_capital: 0.8
+PsarReversalOtocoStrategy:
+  display_name: "Parabolic SAR Reversal (OTOCO)"
+  description: "Stratégie de retournement de tendance basée sur l'indicateur Parabolic SAR, avec gestion des ordres OTOCO (One-Triggers-One-Cancels-Other)."
+  params:
+    psar_step: 0.02
+    psar_max_step: 0.2
+    risk_reward_ratio: 2.0
+  optimization_space:
+    psar_step:
+      type: 'float'
+      low: 0.01
+      high: 0.05
+      step: 0.005
+    psar_max_step:
+      type: 'float'
+      low: 0.1
+      high: 0.5
+      step: 0.05
+    risk_reward_ratio:
+      type: 'float'
+      low: 1.0
+      high: 5.0
+      step: 0.5
 
-  TripleMAAnticipationStrategy:
-    optimizable_params:
-      indicator_frequency:
-        type: "categorical"
-        choices: ['5m', '15m', '30m', '1h', '4h']
-      fast_period:
-        type: "int"
-        low: 5
-        high: 20
-        step: 1
-      medium_period:
-        type: "int"
-        low: 20
-        high: 50
-        step: 5
-      slow_period:
-        type: "int"
-        low: 50
-        high: 100
-        step: 5
-      stop_loss_pct:
-        type: "float"
-        low: 0.01
-        high: 0.15
-        step: 0.005
-      take_profit_pct:
-        type: "float"
-        low: 0.02
-        high: 0.20
-        step: 0.01
-    fixed_params:
-      position_sizing_pct_capital: 0.8
-      anticipation_threshold_pct: 0.001
+TripleMaAnticipationStrategy:
+  display_name: "Triple Moving Average Anticipation"
+  description: "Stratégie utilisant trois moyennes mobiles pour anticiper les retournements de tendance, avec un stop-loss basé sur l'ATR."
+  params:
+    fast_ma_period: 5
+    medium_ma_period: 8
+    slow_ma_period: 13
+    atr_period_sl: 14
+    atr_multiplier_sl: 2.0
+    risk_reward_ratio: 1.5
+  optimization_space:
+    fast_ma_period:
+      type: 'int'
+      low: 3
+      high: 10
+      step: 1
+    medium_ma_period:
+      type: 'int'
+      low: 8
+      high: 20
+      step: 1
+    slow_ma_period:
+      type: 'int'
+      low: 13
+      high: 30
+      step: 1
+    atr_period_sl:
+      type: 'int'
+      low: 7
+      high: 21
+      step: 1
+    atr_multiplier_sl:
+      type: 'float'
+      low: 1.0
+      high: 3.0
+      step: 0.25
+    risk_reward_ratio:
+      type: 'float'
+      low: 1.0
+      high: 4.0
+      step: 0.5
+
+BbandsVolumeRsiStrategy:
+  display_name: "Bollinger Bands, Volume & RSI Breakout"
+  description: "Stratégie de cassure utilisant les Bandes de Bollinger, confirmée par le volume et le RSI, avec SL/TP basés sur l'ATR."
+  params:
+    bbands_period: 20
+    bbands_std_dev: 2.0
+    volume_ma_period: 20
+    rsi_period: 14
+    rsi_buy_breakout_threshold: 60
+    rsi_sell_breakout_threshold: 40
+    atr_period: 14
+    sl_atr_mult: 1.5
+    tp_atr_mult: 3.0
+  optimization_space:
+    bbands_period:
+      type: 'int'
+      low: 10
+      high: 50
+      step: 2
+    bbands_std_dev:
+      type: 'float'
+      low: 1.5
+      high: 3.0
+      step: 0.25
+    volume_ma_period:
+      type: 'int'
+      low: 10
+      high: 50
+      step: 2
+    rsi_period:
+      type: 'int'
+      low: 7
+      high: 21
+      step: 1
+    rsi_buy_breakout_threshold:
+      type: 'float'
+      low: 55.0
+      high: 75.0
+      step: 1.0
+    rsi_sell_breakout_threshold:
+      type: 'float'
+      low: 25.0
+      high: 45.0
+      step: 1.0
+    atr_period:
+      type: 'int'
+      low: 7
+      high: 21
+      step: 1
+    sl_atr_mult:
+      type: 'float'
+      low: 1.0
+      high: 4.0
+      step: 0.25
+    tp_atr_mult:
+      type: 'float'
+      low: 2.0
+      high: 6.0
+      step: 0.5

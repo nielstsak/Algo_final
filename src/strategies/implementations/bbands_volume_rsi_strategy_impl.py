@@ -1,158 +1,166 @@
-from typing import Dict, Any, Optional, Union
+import logging
+import numpy as np
 import pandas as pd
-from loguru import logger
-from pydantic import Field, model_validator
+from typing import Dict, Any, Optional
 
 from src.strategies.base_strategy import BaseStrategy
-from src.core.exceptions import SignalGenerationError
-from src.strategies.params import BaseFixedParams, BaseOptimizableParams
-from src.data.enriched_dataframe import EnrichedDataFrame
-# Importe le module refactorisé qui contient maintenant des fonctions.
+from src.strategies.params import BbandsVolumeRsiStrategyFixedParams, BbandsVolumeRsiStrategyOptimizableParams
 from src.strategies import technical_indicators as ti
 
-# ==============================================================================
-# Définition des paramètres de la stratégie avec Pydantic pour la validation
-# et la clarté.
-# ==============================================================================
-
-class BbandsVolumeRsiFixedParams(BaseFixedParams):
-    """ Paramètres fixes de la stratégie, non soumis à l'optimisation. """
-    indicator_frequency: str = Field(default='1h', description="Fréquence de temps pour le calcul des indicateurs (ex: '1h', '4h').")
-
-class BbandsVolumeRsiOptimizableParams(BaseOptimizableParams):
-    """ Paramètres optimisables de la stratégie. """
-    bb_period: int = Field(default=20, gt=0, description="Période pour les Bandes de Bollinger.")
-    bb_std_dev: float = Field(default=2.0, gt=0, description="Écart-type pour les Bandes de Bollinger.")
-    rsi_period: int = Field(default=14, gt=0, description="Période pour le RSI.")
-    rsi_overbought: int = Field(default=70, gt=0, lt=100, description="Seuil de surachat du RSI.")
-    rsi_oversold: int = Field(default=30, gt=0, lt=100, description="Seuil de survente du RSI.")
-    volume_factor: float = Field(default=1.5, ge=0, description="Facteur de multiplication pour le volume moyen de confirmation.")
-    volume_period: int = Field(default=20, gt=0, description="Période pour la SMA du volume.")
-    position_sizing_pct_capital: float = Field(default=0.01, gt=0, lt=1, description="Pourcentage du capital à risquer par transaction.")
-
-    @model_validator(mode='after')
-    def check_rsi_logic(self) -> 'BbandsVolumeRsiOptimizableParams':
-        """ Valide que le seuil de survente est bien inférieur à celui de surachat. """
-        if self.rsi_oversold >= self.rsi_overbought:
-            raise ValueError("La logique du RSI est invalide: rsi_oversold doit être inférieur à rsi_overbought.")
-        return self
-
-# ==============================================================================
-# Implémentation de la classe de stratégie
-# ==============================================================================
+logger = logging.getLogger(__name__)
 
 class BbandsVolumeRsiStrategy(BaseStrategy):
     """
-    Stratégie de trading qui combine les Bandes de Bollinger pour la volatilité,
-    le RSI pour le momentum, et le volume comme confirmation de la force du mouvement.
+    Stratégie de trading basée sur la cassure (breakout) des Bandes de Bollinger,
+    confirmée par le volume et le RSI. La gestion des risques (Stop-Loss et
+    Take-Profit) est assurée dynamiquement par l'indicateur Average True Range (ATR).
     """
     name: str = "BbandsVolumeRsiStrategy"
-    version: str = "2.5.0"
-    description: str = "Stratégie combinant Bandes de Bollinger, RSI et confirmation par volume."
+    version: str = "1.0.0"
+    description: str = "Bollinger Bands, Volume & RSI Breakout Strategy with ATR-based SL/TP."
 
-    # Association des modèles de paramètres à la classe.
-    fixed_params_model = BbandsVolumeRsiFixedParams
-    optimizable_params_model = BbandsVolumeRsiOptimizableParams
+    fixed_params_model = BbandsVolumeRsiStrategyFixedParams
+    optimizable_params_model = BbandsVolumeRsiStrategyOptimizableParams
 
     def __init__(self, params: Optional[Dict[str, Any]] = None, **kwargs):
-        self.pair_symbol = kwargs.get('pair_symbol', 'PAIR_UNSPECIFIED')
-        self.strategy_name_log_prefix = f"[{self.name}][{self.pair_symbol}]"
-        super().__init__(params, **kwargs)
-
-        # Définition des besoins de la stratégie à partir des paramètres.
-        self.required_timeframes = [self.get_param('indicator_frequency')]
-        self.min_required_periods = max(
-            self.get_param('bb_period'),
-            self.get_param('rsi_period'),
-            self.get_param('volume_period')
-        ) + 1 # +1 pour la marge de calcul
-        
-        # Noms de colonnes standardisés utilisés dans la stratégie.
-        self.bb_lower_col, self.bb_middle_col, self.bb_upper_col = "BBL", "BBM", "BBU"
-        self.rsi_col = "RSI"
-        self.volume_sma_col = "volume_sma"
-        
-        logger.info(f"{self.strategy_name_log_prefix} Stratégie initialisée.")
-
-    def calculate_indicators(self, data: Union[Dict[str, pd.DataFrame], EnrichedDataFrame]) -> pd.DataFrame:
         """
-        Calcule tous les indicateurs nécessaires à la stratégie.
+        Initialise la stratégie avec les paramètres fournis et validés.
+
+        Args:
+            params: Dictionnaire optionnel de paramètres pour surcharger les valeurs par défaut.
+            **kwargs: Arguments supplémentaires passés à BaseStrategy (ex: pair_symbol).
         """
-        log_pref = self.strategy_name_log_prefix
-        df = self._prepare_indicator_data(data)
-        freq = self.get_param('indicator_frequency')
-        
-        # Détermine les noms des colonnes sources (close et volume).
-        close_col = f"K_{freq}_close" if f"K_{freq}_close" in df.columns else "close"
-        volume_col = f"K_{freq}_volume" if f"K_{freq}_volume" in df.columns else "volume"
-        
-        if close_col not in df.columns or volume_col not in df.columns:
-            raise SignalGenerationError(f"Colonnes sources '{close_col}' ou '{volume_col}' sont manquantes.", self.name)
+        super().__init__(params=params, **kwargs)
+        # self.params est maintenant un dictionnaire contenant les paramètres validés et fusionnés.
+        # La validation est gérée par BaseStrategy en utilisant fixed_params_model et optimizable_params_model.
+        self.indicators_df = pd.DataFrame()
 
-        # Utilisation des fonctions pures du module 'technical_indicators'.
-        bbands = ti.calculate_bollinger_bands(df[close_col], self.get_param('bb_period'), self.get_param('bb_std_dev'))
-        rsi = ti.calculate_rsi(df[close_col], self.get_param('rsi_period'))
-        volume_sma = ti.calculate_sma(df[volume_col], self.get_param('volume_period'))
-        volume_sma.name = self.volume_sma_col # Assigne le nom standard à la série de SMA du volume.
-
-        # Concaténation de tous les indicateurs calculés en un seul DataFrame.
-        indicators_df = pd.concat([bbands, rsi, volume_sma], axis=1)
-        
-        # Jointure des indicateurs avec le DataFrame original.
-        final_df = df.join(indicators_df)
-
-        # Ajout des colonnes 'close' et 'volume' sans préfixe pour un accès facile dans 'generate_signals'.
-        if 'close' not in final_df.columns: final_df['close'] = final_df[close_col]
-        if 'volume' not in final_df.columns: final_df['volume'] = final_df[volume_col]
-            
-        self._indicators_cache = final_df
-        logger.info(f"{log_pref} Indicateurs calculés avec succès.")
-        return final_df
-
-    def generate_signals(self, indicators_df: pd.DataFrame) -> pd.DataFrame:
+    def _calculate_indicators(self, data: pd.DataFrame) -> None:
         """
-        Génère les signaux d'entrée et de sortie à partir des indicateurs calculés.
+        Calcule tous les indicateurs techniques nécessaires à la stratégie
+        et les stocke dans l'attribut `self.indicators_df`.
+
+        Args:
+            data: DataFrame contenant les données de marché (OHLCV).
         """
-        if indicators_df.empty:
-            return pd.DataFrame()
-        df = indicators_df.copy()
+        if data.empty:
+            logger.warning("Le DataFrame de données est vide. Aucun indicateur ne sera calculé.")
+            self.indicators_df = pd.DataFrame()
+            return
 
-        # Vérification de la présence de toutes les colonnes requises.
-        required_cols = [self.bb_lower_col, self.bb_upper_col, self.bb_middle_col, self.rsi_col, self.volume_sma_col, 'close', 'volume']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            raise SignalGenerationError(f"Colonnes requises manquantes pour la génération de signaux: {missing_cols}", strategy_name=self.name)
+        # Calcul des Bandes de Bollinger
+        bbands_df = ti.calculate_bbands(
+            close=data['close'],
+            period=self.params.bbands_period,
+            std_dev=self.params.bbands_std_dev
+        )
 
-        # --- CORRECTION: Utilisation de self.get_param() au lieu de self.params_obj ---
-        # Récupération des paramètres pour la lisibilité.
-        rsi_overbought = self.get_param('rsi_overbought')
-        rsi_oversold = self.get_param('rsi_oversold')
-        volume_factor = self.get_param('volume_factor')
-        
-        # --- Définition des conditions logiques ---
-        price_crosses_upper = (df['close'] > df[self.bb_upper_col]) & (df['close'].shift(1) <= df[self.bb_upper_col].shift(1))
-        price_crosses_lower = (df['close'] < df[self.bb_lower_col]) & (df['close'].shift(1) >= df[self.bb_lower_col].shift(1))
-        
-        rsi_is_overbought = df[self.rsi_col] > rsi_overbought
-        rsi_is_oversold = df[self.rsi_col] < rsi_oversold
-        volume_confirms = df['volume'] > (df[self.volume_sma_col] * volume_factor)
+        # Calcul de la moyenne mobile du volume
+        volume_ma = ti.calculate_sma(
+            data=data['volume'],
+            period=self.params.volume_ma_period
+        )
+        volume_ma.name = 'volume_ma'
 
-        # --- Combinaison des conditions pour les signaux d'entrée ---
-        entry_long_signal = price_crosses_lower & rsi_is_oversold & volume_confirms
-        entry_short_signal = price_crosses_upper & rsi_is_overbought & volume_confirms
+        # Calcul du RSI
+        rsi = ti.calculate_rsi(
+            close=data['close'],
+            period=self.params.rsi_period
+        )
+        rsi.name = 'rsi'
         
-        # --- Définition des signaux de sortie ---
-        # Sortie de position longue lorsque le prix croise la moyenne mobile centrale par le haut.
-        exit_long_signal = (df['close'] > df[self.bb_middle_col]) & (df['close'].shift(1) <= df[self.bb_middle_col].shift(1))
-        # Sortie de position courte lorsque le prix croise la moyenne mobile centrale par le bas.
-        exit_short_signal = (df['close'] < df[self.bb_middle_col]) & (df['close'].shift(1) >= df[self.bb_middle_col].shift(1))
+        # Calcul de l'ATR pour la gestion des risques
+        atr = ti.calculate_atr(
+            high=data['high'],
+            low=data['low'],
+            close=data['close'],
+            period=self.params.atr_period
+        )
+        atr.name = 'atr'
+
+        # Fusion de tous les indicateurs dans un seul DataFrame
+        self.indicators_df = pd.concat([data, bbands_df, volume_ma, rsi, atr], axis=1)
+        logger.info("Indicateurs calculés avec succès pour la stratégie de breakout.")
+
+    def generate_signals(self, data: pd.DataFrame) -> None:
+        """
+        Génère les signaux de trading (entrées, sorties, SL/TP) basés sur la
+        logique de la stratégie et les stocke dans `self._signals`.
+
+        Args:
+            data: DataFrame contenant les données de marché (OHLCV).
+        """
+        self._calculate_indicators(data)
+
+        if self.indicators_df.empty:
+            logger.warning("Le DataFrame d'indicateurs est vide. Impossible de générer des signaux.")
+            self._signals = pd.DataFrame()
+            return
+
+        df = self.indicators_df
         
-        # Création du DataFrame de signaux.
+        # --- Conditions pour les signaux d'achat (Long) ---
+        long_breakout_cond = df['close'] > df['bb_upper']
+        long_volume_cond = df['volume'] > df['volume_ma']
+        long_rsi_cond = df['rsi'] > self.params.rsi_buy_breakout_threshold
+        
+        all_long_conditions = long_breakout_cond & long_volume_cond & long_rsi_cond
+        
+        # Le signal se déclenche uniquement sur la première bougie qui remplit les conditions
+        entry_long = all_long_conditions & ~all_long_conditions.shift(1).fillna(False)
+
+        # --- Conditions pour les signaux de vente (Short) ---
+        short_breakout_cond = df['close'] < df['bb_lower']
+        short_volume_cond = df['volume'] > df['volume_ma']
+        short_rsi_cond = df['rsi'] < self.params.rsi_sell_breakout_threshold
+        
+        all_short_conditions = short_breakout_cond & short_volume_cond & short_rsi_cond
+
+        # Le signal se déclenche uniquement sur la première bougie qui remplit les conditions
+        entry_short = all_short_conditions & ~all_short_conditions.shift(1).fillna(False)
+        
+        # --- Construction du DataFrame de signaux ---
         signals = pd.DataFrame(index=df.index)
-        signals['entry_long'] = entry_long_signal
-        signals['entry_short'] = entry_short_signal
-        signals['exit_long'] = exit_long_signal
-        signals['exit_short'] = exit_short_signal
+        signals['entry_long'] = entry_long
+        signals['entry_short'] = entry_short
+        
+        # Les sorties sont gérées par SL/TP, donc ces signaux sont toujours False
+        signals['exit_long'] = False
+        signals['exit_short'] = False
+
+        # --- Calcul des niveaux de Stop-Loss et Take-Profit ---
+        # SL/TP ne sont calculés que sur les bougies d'entrée
+        
+        # Pour les positions longues
+        signals['sl_long'] = np.where(
+            entry_long,
+            df['close'] - (df['atr'] * self.params.sl_atr_mult),
+            np.nan
+        )
+        signals['tp_long'] = np.where(
+            entry_long,
+            df['close'] + (df['atr'] * self.params.tp_atr_mult),
+            np.nan
+        )
+        
+        # Pour les positions courtes
+        signals['sl_short'] = np.where(
+            entry_short,
+            df['close'] + (df['atr'] * self.params.sl_atr_mult),
+            np.nan
+        )
+        signals['tp_short'] = np.where(
+            entry_short,
+            df['close'] - (df['atr'] * self.params.tp_atr_mult),
+            np.nan
+        )
+        
+        # Fusion des SL/TP dans des colonnes uniques pour le moteur de backtesting
+        signals['sl'] = signals['sl_long'].fillna(signals['sl_short'])
+        signals['tp'] = signals['tp_long'].fillna(signals['tp_short'])
+
+        # Nettoyage des colonnes intermédiaires
+        signals.drop(columns=['sl_long', 'tp_long', 'sl_short', 'tp_short'], inplace=True)
         
         self._signals = signals
-        return self._signals.copy()
+        logger.info(f"Signaux générés : {entry_long.sum()} signaux d'achat, {entry_short.sum()} signaux de vente.")

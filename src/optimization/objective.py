@@ -69,15 +69,38 @@ class Objective:
     def backtest_with_params(self, params: Dict[str, Any]) -> Dict[str, float]:
         """Exécute un backtest de validation et retourne les métriques."""
         logger.debug(f"Exécution d'un backtest de validation avec les paramètres : {params}")
-        try:
+        try: # self.data est le oos_df dans ce contexte
+            if self.data.empty:
+                logger.warning(f"Validation backtest with params {params}: Input data (OOS) is empty. Returning empty metrics.")
+                return {}
+            
             portfolio = self._run_backtest(params)
-            return PerformanceMetrics.calculate_all_metrics(portfolio)
-        except BacktestFailureError:
+            
+            if portfolio.value().min() <= 0: # Vérifier la condition de ruine
+                 logger.warning(f"Validation backtest with params {params} resulted in ruin. Returning empty metrics.")
+                 return {}
+
+            metrics = PerformanceMetrics.calculate_all_metrics(portfolio)
+            if not metrics: # Si calculate_all_metrics retourne vide ou None
+                logger.warning(f"Validation backtest with params {params}: Metrics calculation returned empty. Returning empty metrics.")
+                return {}
+            return metrics
+        except BacktestFailureError as e:
+            logger.warning(f"Validation backtest failed for params {params}: {e}. Returning empty metrics.")
+            return {}
+        except Exception as e: # Attraper toute autre erreur inattendue
+            logger.error(f"Unexpected error during validation backtest with params {params}: {e}", exc_info=True)
             return {}
 
     def __call__(self, trial: optuna.Trial) -> Union[float, Tuple[float, ...]]:
         try:
             params = self._get_params_for_trial(trial)
+            
+            # Vérifier si les données d'entrée (In-Sample) sont vides
+            if self.data.empty:
+                logger.warning(f"Trial {trial.number}: Input data for In-Sample backtest is empty. Penalizing trial.")
+                raise BacktestFailureError("Input data for IS backtest is empty.")
+                
             portfolio = self._run_backtest(params)
             
             # --- IMPLÉMENTATION DE LA CONDITION DE RUINE ---
@@ -87,7 +110,8 @@ class Objective:
                 raise BacktestFailureError("Condition de ruine atteinte.")
 
             all_metrics = PerformanceMetrics.calculate_all_metrics(portfolio)
-            if not all_metrics:
+            if not all_metrics: # Vérifier si le dictionnaire de métriques est vide
+                logger.warning(f"Essai {trial.number}: Le calcul des métriques a retourné un résultat vide. Pénalisation.")
                 raise BacktestFailureError("Le calcul des métriques a retourné un résultat vide.")
 
             objective_values = []
