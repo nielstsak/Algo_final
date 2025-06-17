@@ -23,7 +23,7 @@ from src.core.config import get_settings
 from src.optimization.config import MainOptimizationConfig, OptunaProfile
 from src.optimization.objective import Objective
 from src.optimization.wfo_engine import WFOptimizer 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.data.enriched_dataframe import EnrichedDataFrame
 from src.core.exceptions import OptimizationError, ConfigurationError
 

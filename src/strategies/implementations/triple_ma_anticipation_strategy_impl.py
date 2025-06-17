@@ -4,7 +4,7 @@ import pandas as pd
 from loguru import logger
 from pydantic import Field, model_validator
 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.core.exceptions import SignalGenerationError
 from src.strategies.params import BaseFixedParams, BaseOptimizableParams
 from src.data.enriched_dataframe import EnrichedDataFrame

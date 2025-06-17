@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch
 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.core.exceptions import IndicatorCalculationError, SignalGenerationError
 
 

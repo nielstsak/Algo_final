@@ -20,7 +20,7 @@ from src.core.exceptions import (
 from src.data.data_manager import DataManager
 from src.data.enriched_dataframe import EnrichedDataFrame
 from src.strategies.strategy_loader import StrategyLoader
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.backtesting.vectorbt_engine import VectorBTEngine
 from src.backtesting.performance_metrics import PerformanceMetrics
 from src.backtesting.visualizations import BacktestVisualizer

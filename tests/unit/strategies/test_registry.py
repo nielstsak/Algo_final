@@ -4,7 +4,7 @@ Tests unitaires pour le pattern Registry des stratégies.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.strategies.registry import StrategyRegistry
 from src.core.exceptions import StrategyLoadError
 

@@ -13,7 +13,7 @@ from typing import Type, Dict, Any, Union, Tuple, List
 
 # --- Imports Locaux ---
 from src.optimization.config import MainOptimizationConfig
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.strategies.params import suggest_params_from_config
 from src.data.enriched_dataframe import EnrichedDataFrame
 # MODIFIÉ: L'importation de VectorBTEngine est retirée pour éviter une dépendance circulaire.

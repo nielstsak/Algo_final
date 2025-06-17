@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Type, Any, Tuple
 from loguru import logger
 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.strategies.registry import StrategyRegistry
 from src.core.exceptions import StrategyLoadError, StrategyError, InvalidStrategyParamsError
 

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional, Union
 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.strategies.params import (
     BbandsVolumeRsiStrategyFixedParams,
     BbandsVolumeRsiStrategyOptimizableParams,

@@ -7,7 +7,7 @@ from typing import Dict, Type, Any, Optional
 import inspect
 import logging
 
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.core.exceptions import StrategyLoadError
 
 logger = logging.getLogger(__name__)

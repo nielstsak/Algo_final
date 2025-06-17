@@ -10,7 +10,7 @@ from src.core.constants import Kline
 from src.core.exceptions import DataError
 from src.core.config import Settings, get_settings
 from src.core.exceptions import  ConfigurationError
-from src.strategies.base_strategy import BaseStrategy
+from src.strategies.base import BaseStrategy
 from src.backtesting.performance_metrics import PerformanceMetrics
 from src.backtesting.signal_adapter import SignalAdapter
 
