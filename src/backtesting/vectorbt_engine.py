@@ -1,164 +1,144 @@
-"""
-Ce module est le cœur du moteur de backtesting, utilisant la bibliothèque `vectorbt`.
-Il a été entièrement refactorisé pour être piloté par la nouvelle structure de
-configuration Pydantic (`SimulationConfig`) et pour intégrer les modèles
-dynamiques de calcul de frais et de slippage.
-"""
-
+# src/backtesting/vectorbt_engine.py
 import logging
-import pandas as pd
+from typing import Tuple, Dict, Any, Optional
+
 import numpy as np
-import vectorbt as vbt # type: ignore # type: ignore
-from typing import Type, Optional, Dict, Any, Union, Tuple, List
-
-
-# --- Imports Locaux ---
+import pandas as pd
+import vectorbt as vbt
+from vectorbt.portfolio.base import Portfolio
+from src.core.constants import Kline
+from src.core.exceptions import DataError
+from src.core.config import Settings, get_settings
+from src.core.exceptions import  ConfigurationError
 from src.strategies.base_strategy import BaseStrategy
-from src.strategies.signal_formatter import SignalFormatter
-from src.optimization.config import SimulationConfig
-from src.backtesting.fee_calculator import get_fee_calculator
-from src.backtesting.slippage_model import get_slippage_model
-from src.core.constants import Kline # Ajouté pour Kline.INTERVAL_1MINUTE
-from src.core.exceptions import BacktestFailureError
+from src.backtesting.performance_metrics import PerformanceMetrics
+from src.backtesting.signal_adapter import SignalAdapter
 
 logger = logging.getLogger(__name__)
 
-class VectorBTEngine:
+# --- Classe VectorBTBacktestingEngine (Ajout) ---
+# Cette classe est ajoutée pour répondre à l'ImportError.
+# Elle intègre la logique de backtesting en utilisant le code existant.
+
+class VectorBTBacktestingEngine:
     """
-    Moteur de backtesting vectorisé qui orchestre l'exécution d'une stratégie
-    sur des données de marché en utilisant vectorbt.
+    Moteur de backtesting utilisant la bibliothèque VectorBT.
+
+    Cette classe orchestre l'exécution d'un backtest vectoriel. Elle utilise
+    SignalAdapter pour transformer les signaux de la stratégie, exécute le
+    backtest via vectorbt, et calcule un ensemble complet de métriques de
+    performance.
     """
 
-    def __init__(self,
-                 data: pd.DataFrame,
-                 strategy: BaseStrategy,
-                 config: SimulationConfig):
+    def __init__(
+        self,
+        strategy: BaseStrategy,
+        symbol: str,
+        settings: Optional[Settings] = None,
+        backtest_config: Optional[Dict[str, Any]] = None,
+    ):
         """
         Initialise le moteur de backtesting.
 
         Args:
-            data: DataFrame contenant les données de marché (OHLCV).
-            strategy: Une instance de la stratégie à exécuter.
-            config: Un objet Pydantic `SimulationConfig` contenant tous les
-                    paramètres de la simulation.
+            strategy: L'instance de la stratégie à backtester.
+            symbol: Le symbole de la paire de trading (ex: 'BTC/USDT').
+            settings: L'objet de configuration global. Si None, il sera chargé.
+            backtest_config: Dictionnaire de configuration spécifique au backtest.
         """
-        self.data = data
         self.strategy = strategy
-        self.config = config
+        self.symbol = symbol
+        self.settings = settings or get_settings()
         
-        self.fee_calculator = get_fee_calculator(self.config.fee_config)
-        self.slippage_model = get_slippage_model(self.config.slippage_config)
+        # Charge la configuration de backtest depuis les settings ou utilise celle fournie
+        self.backtest_config = backtest_config or self._load_backtest_config()
         
-        logger.info("VectorBTEngine initialisé avec la nouvelle configuration de simulation.")
+        self.signal_adapter = SignalAdapter()
 
-    def _sanitize_series(self, series: Optional[pd.Series], series_name: str) -> Optional[pd.Series]:
-        """Assainit une série pour s'assurer qu'elle est numérique et scalaire."""
-        if series is None:
-            return None
-        
-        if not pd.api.types.is_numeric_dtype(series.dtype):
-            logger.warning(
-                f"La série '{series_name}' (dtype: {series.dtype}) pour {self.strategy.pair_symbol} "
-                f"n'est pas de type numérique. Tentative de conversion/assainissement."
-            )
-            
-            def _try_extract_scalar(x):
-                if isinstance(x, (list, tuple, np.ndarray)):
-                    return x[0] if len(x) > 0 and isinstance(x[0], (int, float, np.number)) else np.nan
-                return x
+    def _load_backtest_config(self) -> Dict[str, Any]:
+        """Charge la configuration de backtesting depuis l'objet settings."""
+        try:
+            # Idéalement, les paramètres de backtest seraient dans une section
+            # dédiée de config.yaml. Pour l'instant, on utilise des valeurs
+            # par défaut si elles ne sont pas trouvées.
+            config_dict = self.settings.model_dump().get("backtesting", {})
+            return {
+                "initial_capital": config_dict.get("initial_capital", 10000.0),
+                "commission_pct": config_dict.get("commission_pct", 0.001),
+                "slippage_pct": config_dict.get("slippage_pct", 0.0005),
+                "freq": config_dict.get("freq", "1D"),
+            }
+        except Exception as e:
+            logger.warning(f"Impossible de charger la configuration de backtest. Utilisation des valeurs par défaut. Erreur: {e}")
+            return {
+                "initial_capital": 10000.0,
+                "commission_pct": 0.001,
+                "slippage_pct": 0.0005,
+                "freq": "1D",
+            }
 
-            sanitized_values = series.apply(_try_extract_scalar)
-            series = pd.to_numeric(sanitized_values, errors='coerce')
-            logger.info(f"Série '{series_name}' pour {self.strategy.pair_symbol} assainie. Nouveau dtype: {series.dtype}")
-        return series
-
-    def _prepare_signals(self) -> pd.DataFrame:
+    def run(self, data: pd.DataFrame) -> Tuple[Dict[str, Any], Optional[Portfolio]]:
         """
-        Prépare les signaux de trading en exécutant la logique de la stratégie.
-        """
-        logger.debug("Génération des indicateurs et des signaux de la stratégie...")
-        indicators = self.strategy.calculate_indicators(self.data)
-        raw_signals = self.strategy.generate_signals(indicators)
-        
-        return raw_signals
+        Exécute le backtest complet de la stratégie.
 
-    def run(self) -> vbt.Portfolio:
-        """
-        Exécute le backtest complet.
+        Args:
+            data: DataFrame pandas contenant les données de marché (OHLCV).
 
         Returns:
-            Un objet `vbt.Portfolio` contenant les résultats du backtest.
-
-        Raises:
-            BacktestFailureError: Si le backtest échoue ou ne produit aucun trade.
+            Un tuple contenant :
+            - Un dictionnaire des métriques de performance.
+            - L'objet Portfolio de vectorbt (ou None si le backtest échoue).
         """
+        if data.empty:
+            logger.error("Les données fournies pour le backtest sont vides. Annulation.")
+            raise DataError("Les données pour le backtest ne peuvent pas être vides.")
+
         try:
-            signals = self._prepare_signals()
-
-            close_col_name = next((c for c in self.data.columns if c.endswith('_close')), None)
-            if close_col_name is None:
-                if 'close' in self.data.columns:
-                    close_col_name = 'close'
-                else:
-                    raise BacktestFailureError(
-                        f"Impossible de trouver une colonne de prix de clôture ('close' ou '*_close'). "
-                        f"Colonnes disponibles: {self.data.columns.tolist()}"
-                    )
-            logger.debug(f"Colonne de clôture identifiée pour le backtest : '{close_col_name}'")
-            close_prices = self.data[close_col_name]
-
-            # Assainissement de close_prices
-            close_prices = self._sanitize_series(close_prices, f"close_prices ({close_col_name})")
-            if close_prices is None or close_prices.isnull().all():
-                raise BacktestFailureError(f"Les prix de clôture pour {self.strategy.pair_symbol} sont tous NaN après assainissement.")
-
-            fees = self.config.fee_config.value if self.config.fee_config.method == 'PERCENTAGE' else 0.0
-            if self.config.fee_config.method != 'PERCENTAGE':
-                logger.warning(f"La méthode de frais '{self.config.fee_config.method}' n'est pas directement supportée. Les frais ne seront pas appliqués.")
-
-            # Slippage series est basée sur close_prices, qui est maintenant assaini.
-            slippage_series = self.slippage_model.generate_slippage_series(close_prices)
-
-            # Préparer sl_stop et tp_stop
-            sl_series = signals.get('sl')
-            sl_series = self._sanitize_series(sl_series, "sl_stop")
-            if sl_series is not None and sl_series.isnull().all():
-                logger.debug("La série sl_stop ne contient que des NaN, passage de None à vectorbt.")
-                sl_series = None
-
-            tp_series = signals.get('tp')
-            tp_series = self._sanitize_series(tp_series, "tp_stop")
-            if tp_series is not None and tp_series.isnull().all():
-                logger.debug("La série tp_stop ne contient que des NaN, passage de None à vectorbt.")
-                tp_series = None
-            logger.debug("Exécution du backtest avec vectorbt...")
+            logger.debug(f"Début du backtest pour la stratégie '{self.strategy.name}' sur '{self.symbol}'.")
             
-            backtest_frequency = self.strategy.get_param('indicator_frequency')
-            
-            # --- CORRECTION ---
-            # Suppression des paramètres de callback (stop_func, call_seq) qui ne sont
-            # pas supportés par cette fonction et causaient le crash.
-            portfolio = vbt.Portfolio.from_signals(
-                close=close_prices,
-                entries=signals['entry_long'],
-                exits=signals['exit_long'],
-                short_entries=signals['entry_short'],
-                short_exits=signals['exit_short'],
-                freq=backtest_frequency,
-                init_cash=self.config.initial_capital,
-                fees=fees,
-                slippage=slippage_series,
-                sl_stop=sl_series,
-                tp_stop=tp_series
+            # 1. Calculer les indicateurs via la stratégie
+            indicators_df = self.strategy.calculate_indicators(data)
+            if indicators_df.empty:
+                raise BacktestingError("Le calcul des indicateurs n'a retourné aucune donnée.")
+
+            # 2. Générer les signaux de la stratégie
+            signals_df = self.strategy.generate_signals(indicators_df)
+            if signals_df.empty:
+                logger.warning("Aucun signal généré. Le backtest résultera en une performance nulle.")
+                return calculate_performance_metrics(None, self.backtest_config["initial_capital"]), None
+
+            # 3. Adapter les signaux pour VectorBT
+            vbt_signals = self.signal_adapter.adapt(signals_df)
+
+            # 4. Exécuter le backtest avec VectorBT
+            portfolio = Portfolio.from_signals(
+                close=indicators_df['close'],
+                entries=vbt_signals['entries'],
+                exits=vbt_signals['exits'],
+                sl_stop=vbt_signals.get('sl'),
+                tp_stop=vbt_signals.get('tp'),
+                init_cash=self.backtest_config["initial_capital"],
+                fees=self.backtest_config["commission_pct"],
+                slippage=self.backtest_config["slippage_pct"],
+                freq=self.backtest_config["freq"],
+            )
+
+            # 5. Calculer les métriques de performance
+            performance_stats = calculate_performance_metrics(
+                portfolio, self.backtest_config["initial_capital"]
             )
             
-            if portfolio.trades.count() == 0:
-                logger.warning("Le backtest s'est terminé sans aucune transaction.")
-                raise BacktestFailureError("Aucun trade exécuté.")
+            logger.info(f"Backtest terminé pour {self.symbol}. "
+                        f"Rendement Total: {performance_stats.get('Total Return [%]', 'N/A'):.2f}%, "
+                        f"Ratio Sharpe: {performance_stats.get('Sharpe Ratio', 'N/A'):.2f}")
 
-            logger.info(f"Backtest réussi. Nombre de trades: {portfolio.trades.count()}.")
-            return portfolio
+            return performance_stats, portfolio
 
         except Exception as e:
-            logger.error(f"Une erreur est survenue durant l'exécution du backtest : {e}", exc_info=True)
-            raise BacktestFailureError(f"Échec du moteur vectorbt: {e}") from e
+            logger.exception(
+                f"Erreur critique lors de l'exécution du backtest pour "
+                f"'{self.strategy.name}' sur '{self.symbol}': {e}"
+            )
+            # Retourne des métriques vides mais ne crashe pas le programme
+            return calculate_performance_metrics(None, self.backtest_config["initial_capital"]), None
+

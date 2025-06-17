@@ -1,142 +1,169 @@
-# src/cli/commands/optimize.py
-import click
 import logging
-import yaml
-import pandas as pd
+import typer
 from pathlib import Path
-from datetime import datetime
+import os
+import pandas as pd
 
-# --- Imports du projet ---
+# Configure le chemin pour les imports avant les autres imports du projet
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+os.sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.config import load_config as load_yaml_file
+from src.core.exceptions import ConfigurationError, DataError, OptimizationError, StrategyLoadError
 from src.optimization.optimizer import StrategyOptimizer
+from src.optimization.wfo_engine import WFOptimizer
+from src.strategies.strategy_loader import StrategyLoader
 from src.data.data_manager import DataManager
 from src.data.enriched_dataframe import EnrichedDataFrame
-from src.strategies.strategy_loader import StrategyLoader
-from src.core.config import get_settings
-from src.core.exceptions import ConfigurationError, OptimizationError, DataError
-from src.utils.exchange_utils import normalize_pair_symbol
 
+# Configuration du logger pour ce module
 logger = logging.getLogger(__name__)
 
-def optimize_logic(strategy: str,
-                  symbol_with_slash: str,
-                  config_path: str,
-                  strategies_config_path: str,
-                  output_dir: str):
-    """Logique synchrone pour l'optimisation."""
-    click.echo(f"Lancement de l'optimisation pour la stratégie '{strategy}' sur '{symbol_with_slash}'...")
-    
-    # Prépare le symbole pour la couche de données (sans '/') et pour l'optimiseur (avec '/').
-    symbol_for_data = symbol_with_slash.replace('/', '')
-    
-    # --- 1. Chargement des configurations ---
-    with open(strategies_config_path, 'r') as f:
-        strategies_config = yaml.safe_load(f)
-    
-    strategy_params_config = strategies_config.get('strategies', {}).get(strategy)
-    if not strategy_params_config:
-        raise ConfigurationError(f"Configuration pour la stratégie '{strategy}' non trouvée dans '{strategies_config_path}'.")
+# Création d'une application Typer pour la CLI
+cli = typer.Typer()
 
-    # --- 2. Chargement de la stratégie ---
-    strategy_loader = StrategyLoader()
-    strategy_class = strategy_loader.get_strategy_class(strategy)
-    if not strategy_class:
-        raise ConfigurationError(f"Classe de stratégie '{strategy}' non trouvée par le loader.")
-    logger.info(f"Classe de la stratégie '{strategy}' chargée avec succès.")
 
-    # --- 3. Chargement des données ---
-    # Note: création et initialisation manuelle du DataManager
-    data_manager = DataManager()
-    
-    # Initialisation synchrone
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(data_manager.initialize())
-    
-    try:
-        # Utilise le symbole sans la barre oblique pour charger les données
-        enriched_data = loop.run_until_complete(data_manager.get_enriched_klines(pair=symbol_for_data))
-        if enriched_data is None:
-            raise DataError(f"Impossible de charger les données pour le symbole {symbol_with_slash}.")
-        
-        logger.info(f"Données chargées pour {symbol_with_slash}. Total de {len(enriched_data.df)} bougies.")
-    finally:
-        # Fermeture propre des ressources
-        loop.run_until_complete(data_manager.close())
-        loop.close()
-
-    # --- 4. Initialisation de l'optimiseur ---
-    # L'optimiseur utilise le symbole original avec la barre oblique
-    optimizer = StrategyOptimizer.from_yaml(
-        config_path=config_path,
-        strategy_class=strategy_class,
-        strategy_params_config=strategy_params_config,
-        data=enriched_data,
-        pair_symbol=symbol_with_slash
+async def optimize_logic(
+    strategy_name: str,
+    symbol: str,
+    config_path: str,
+    strategies_config_path: str,
+    output_dir: str,
+):
+    """Contient la logique principale pour l'optimisation de la stratégie."""
+    logger.info(
+        f"Lancement de l'optimisation pour la stratégie '{strategy_name}' sur '{symbol}'..."
     )
 
-    # --- 5. Lancement de l'optimisation ---
-    results = optimizer.run()
-
-    # --- 6. Traitement et sauvegarde des résultats ---
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    if isinstance(results, pd.DataFrame):
-        click.echo("Optimisation Walk-Forward terminée.")
-        click.echo(f"Nombre de validations OOS : {len(results)}")
-        output_file = output_path / f"wfo_results_{strategy}_{symbol_for_data}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        results.to_csv(output_file, index=False)
-        click.echo(f"Résultats détaillés du WFO sauvegardés dans : {output_file}")
-    else:
-        best_trial, study = results
-        click.echo("Optimisation simple terminée.")
-        click.secho("\n--- MEILLEUR ESSAI TROUVÉ ---", fg="green", bold=True)
-        click.echo(f"  Numéro de l'essai: {best_trial.number}")
-        
-        if optimizer.is_multi_objective:
-            for i, obj in enumerate(optimizer.config.optuna_config.objectives):
-                click.echo(f"  Objectif '{obj.name}': {best_trial.values[i]:.4f}")
-        else:
-            metric_name = optimizer.config.optuna_config.objectives[0].name
-            click.echo(f"  Objectif '{metric_name}': {best_trial.value:.4f}")
-        
-        click.echo("  Meilleurs paramètres:")
-        for key, value in best_trial.params.items():
-            click.echo(f"    {key}: {value}")
-
-        study_results_df = study.trials_dataframe()
-        output_file = output_path / f"study_results_{strategy}_{symbol_for_data}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        study_results_df.to_csv(output_file, index=False)
-        click.echo(f"\nRésultats complets de l'étude sauvegardés dans : {output_file}")
-
-@click.command()
-@click.option('--strategy-name', '-s', required=True, help="Nom de la classe de la stratégie à optimiser.")
-@click.option('--symbol', required=True, help="Symbole à utiliser pour les données (ex: 'WIF/USDC').")
-@click.option('--config-path', '-c', type=click.Path(exists=True, dir_okay=False, readable=True),
-              default='configs/optimization_config.yaml', help="Chemin vers le fichier de configuration de l'optimisation.")
-@click.option('--strategies-config-path', type=click.Path(exists=True, dir_okay=False, readable=True),
-              default='configs/strategies_config.yaml', help="Chemin vers le fichier de configuration des stratégies.")
-@click.option('--output-dir', '-o', type=click.Path(file_okay=False, writable=True),
-              default='optimization_results', help="Répertoire de sortie pour les résultats.")
-def optimize(strategy_name: str,
-             symbol: str,
-             config_path: str,
-             strategies_config_path: str,
-             output_dir: str):
-    """
-    Lance une session d'optimisation d'hyperparamètres pour une stratégie donnée,
-    en utilisant la configuration fournie.
-    """
+    # 1. Charger la classe de la stratégie
     try:
-        # Exécution synchrone de la logique d'optimisation
-        optimize_logic(strategy_name, symbol, config_path, strategies_config_path, output_dir)
-    except (ConfigurationError, OptimizationError, FileNotFoundError, DataError) as e:
-        logger.error(f"Une erreur de configuration ou d'optimisation est survenue: {e}", exc_info=True)
-        click.secho(f"ERREUR: {e}", fg="red")
-    except Exception as e:
-        logger.error(f"Une erreur inattendue est survenue: {e}", exc_info=True)
-        click.secho(f"ERREUR inattendue: {e}", fg="red")
+        strategy_loader = StrategyLoader()
+        strategy_class = strategy_loader.get_strategy_class(strategy_name)
+        if not strategy_class:
+            raise StrategyLoadError(f"La classe pour la stratégie '{strategy_name}' n'a pas pu être chargée.")
+        logger.info(f"Classe de stratégie '{strategy_name}' chargée avec succès.")
+    except StrategyLoadError as e:
+        logger.error(f"Erreur lors du chargement de la stratégie: {e}")
+        raise
 
-if __name__ == '__main__':
-    optimize()
+    # 2. Charger la configuration des paramètres de la stratégie
+    strategies_config = load_yaml_file(strategies_config_path)
+    if strategy_name not in strategies_config:
+        raise ConfigurationError(
+            f"Configuration pour la stratégie '{strategy_name}' non trouvée dans '{strategies_config_path}'."
+        )
+    strategy_params_config = strategies_config[strategy_name].get("optimization_space", {})
+    if not strategy_params_config:
+        raise ConfigurationError(
+            f"La section 'optimization_space' est manquante ou vide pour la stratégie '{strategy_name}' dans '{strategies_config_path}'."
+        )
+    logger.info("Configuration des paramètres de la stratégie chargée.")
+
+    # 3. Charger les données de marché
+    try:
+        data_manager = DataManager()
+        # MODIFIÉ: Appel de la méthode d'initialisation asynchrone
+        await data_manager.initialize()
+        
+        # Le WFO nécessite des données sur une longue période, typiquement en résolution journalière.
+        # L'intervalle exact peut être configuré ailleurs, mais '1d' est un défaut raisonnable pour le WFO.
+        # MODIFIÉ: Correction du nom de la méthode et ajout de 'await'
+        data_df = await data_manager.get_historical_data(symbol=symbol, timeframe='1d', start_date="2020-01-01") # Exemple de date de début
+        if data_df.empty:
+            raise DataError(f"Aucune donnée historique trouvée pour le symbole '{symbol}'.")
+        enriched_data = EnrichedDataFrame(data_df)
+        logger.info(f"{len(data_df)} points de données chargés pour le symbole '{symbol}'.")
+    except DataError as e:
+        logger.error(f"Erreur lors du chargement des données: {e}")
+        raise
+
+    # 4. Initialiser l'optimiseur de stratégie via la méthode de classe `from_yaml`
+    try:
+        optimizer = StrategyOptimizer.from_yaml(
+            config_path=config_path,
+            strategy_class=strategy_class,
+            strategy_params_config=strategy_params_config,
+            data=enriched_data,
+            pair_symbol=symbol
+        )
+    except ConfigurationError as e:
+        logger.error(f"Erreur lors de l'initialisation de StrategyOptimizer: {e}")
+        raise
+
+    # 5. Exécution du Walk-Forward Optimization (si configuré)
+    # Note: La méthode optimizer.run() devra peut-être aussi devenir asynchrone à l'avenir.
+    if optimizer.config.wfo_config and optimizer.config.wfo_config.enabled:
+        logger.info("Début du processus de Walk-Forward Optimization.")
+        wfo_results_df = optimizer.run()
+
+        # 6. Sauvegarde des résultats
+        if output_dir:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            safe_symbol = symbol.replace('/', '_')
+            results_filename = f"wfo_results_{strategy_name}_{safe_symbol}.csv"
+            wfo_results_df.to_csv(output_path / results_filename, index=False)
+            logger.info(f"Résultats WFO sauvegardés dans : {output_path / results_filename}")
+    else:
+        logger.info("Début du processus d'optimisation simple.")
+        best_trial, study = optimizer.run()
+        logger.info(f"Optimisation simple terminée. Meilleur essai: #{best_trial.number} avec la valeur {best_trial.value:.4f}")
+
+    logger.info("Optimisation terminée avec succès.")
+
+
+@cli.command()
+async def optimize(
+    strategy_name: str = typer.Option(
+        ..., "--strategy-name", "-s", help="Nom de la classe de la stratégie à optimiser."
+    ),
+    symbol: str = typer.Option(
+        ..., "--symbol", "-S", help="Le symbole de la paire à utiliser (ex: 'BTC/USDT')."
+    ),
+    config_path: str = typer.Option(
+        "configs/optimization_config.yaml",
+        "--config-path",
+        "-c",
+        help="Chemin vers le fichier de configuration de l'optimisation.",
+    ),
+    strategies_config_path: str = typer.Option(
+        "configs/strategies_config.yaml",
+        "--strategies-config-path",
+        help="Chemin vers le fichier de configuration des stratégies.",
+    ),
+    output_dir: str = typer.Option(
+        "optimization_results",
+        "--output-dir",
+        "-o",
+        help="Répertoire où sauvegarder les résultats de l'optimisation.",
+    ),
+):
+    """
+    Lance une optimisation pour une stratégie donnée sur un symbole.
+    """
+    # Initialisation de la configuration globale du logging
+    try:
+        from src.core.logging_config import setup_logging
+        from src.core.config import get_settings
+        settings = get_settings()
+        setup_logging(settings)
+    except Exception as e:
+        print(f"Erreur critique lors de la configuration du logging: {e}")
+    
+    try:
+        # MODIFIÉ: Appel de la fonction logique asynchrone avec 'await'
+        await optimize_logic(
+            strategy_name, symbol, config_path, strategies_config_path, output_dir
+        )
+    except (ConfigurationError, DataError, OptimizationError, StrategyLoadError) as e:
+        logger.error(f"Une erreur contrôlée est survenue: {e}")
+        typer.echo(f"ERREUR: {e}")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        logger.exception(f"Une erreur inattendue est survenue: {e}")
+        typer.echo(f"ERREUR inattendue: {e}")
+        raise typer.Exit(code=1)
+
+
+if __name__ == "__main__":
+    cli()

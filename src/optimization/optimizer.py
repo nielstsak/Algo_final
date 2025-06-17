@@ -22,7 +22,7 @@ from optuna.study import StudyDirection
 from src.core.config import get_settings
 from src.optimization.config import MainOptimizationConfig, OptunaProfile
 from src.optimization.objective import Objective
-from src.optimization.wfo_engine import WFOSplitGenerator
+from src.optimization.wfo_engine import WFOptimizer 
 from src.strategies.base_strategy import BaseStrategy
 from src.data.enriched_dataframe import EnrichedDataFrame
 from src.core.exceptions import OptimizationError, ConfigurationError
@@ -194,7 +194,7 @@ class StrategyOptimizer:
 
     def _run_wfo(self) -> pd.DataFrame:
         logger.info("Démarrage du processus de Walk-Forward Optimization.")
-        wfo_splitter = WFOSplitGenerator(config=self.config.wfo_config)
+        wfo_splitter = WFOptimizer(config=self.config.wfo_config)
         
         splits = wfo_splitter.split(self.data.df)
 

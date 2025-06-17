@@ -20,7 +20,7 @@ simulation_config:
     method: 'PERCENTAGE'
     # CORRECTION: La valeur 0.0075 correspond à 0.75%. 
     # Pour 0.1%, utiliser 0.001. Pour 0.075%, utiliser 0.00075.
-    value: 0.001 # Exemple: ajusté pour correspondre à 0.1% de frais
+    value: 0.00075 # Exemple: ajusté pour correspondre à 0.1% de frais
 
   # Configuration du modèle de slippage (glissement de prix).
   # method: 'PERCENTAGE', 'FIXED_PER_TRADE', ou 'VOLATILITY_ADJUSTED'

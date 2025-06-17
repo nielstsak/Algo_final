@@ -1,83 +1,132 @@
-"""
-Ce module définit les modèles Pydantic pour les paramètres de chaque stratégie.
-L'architecture sépare les paramètres en deux catégories :
-- `BaseFixedParams`: Paramètres qui ne sont généralement pas optimisés (ex: noms de colonnes).
-- `BaseOptimizableParams`: Paramètres destinés à l'optimisation (ex: périodes, seuils).
-"""
-from pydantic import BaseModel, Field
+import logging
+from typing import Dict, Any, Type, Optional
+import optuna
+from pydantic import BaseModel, Field, validator
+
+# Logger
+logger = logging.getLogger(__name__)
+
+# --- Modèles de Paramètres de Base ---
 
 
-class BaseParams(BaseModel):
-    """
-    Classe de base pour tous les modèles de paramètres Pydantic.
-    """
+class BaseStrategyParams(BaseModel):
+    """Modèle de base pour tous les paramètres de stratégie."""
+
     class Config:
-        extra = 'forbid'
+        validate_assignment = True
+        extra = "forbid"
 
 
-class BaseFixedParams(BaseParams):
-    """
-    Classe de base pour les paramètres fixes d'une stratégie.
-    """
+class BaseFixedParams(BaseStrategyParams):
+    """Modèle de base pour les paramètres fixes de n'importe quelle stratégie."""
+
     pass
 
 
-class BaseOptimizableParams(BaseParams):
-    """
-    Classe de base pour les paramètres optimisables d'une stratégie.
-    """
+class BaseOptimizableParams(BaseStrategyParams):
+    """Modèle de base pour les paramètres optimisables de n'importe quelle stratégie."""
+
     pass
 
-# --- Paramètres pour SMACrossStrategy ---
-class SMACrossFixedParams(BaseFixedParams):
-    pass
 
-class SMACrossOptimizableParams(BaseOptimizableParams):
-    fast_ma: int = Field(10, gt=0, description="Période de la moyenne mobile rapide.")
-    slow_ma: int = Field(30, gt=0, description="Période de la moyenne mobile lente.")
-    stop_loss_pct: float = Field(0.05, gt=0, lt=1, description="Pourcentage de perte pour le stop-loss.")
-    take_profit_pct: float = Field(0.10, gt=0, lt=1, description="Pourcentage de gain pour le take-profit.")
+class StopLossTakeProfitParams(BaseFixedParams):
+    """Paramètres communs pour la gestion des risques (généralement fixes)."""
 
-# --- Paramètres pour PsarReversalOtocoStrategy ---
-class PsarReversalOtocoFixedParams(BaseFixedParams):
-    pass
+    sl_atr_mult: float = Field(
+        ...,
+        gt=0,
+        description="Multiplicateur de l'ATR pour définir le Stop-Loss.",
+    )
+    tp_atr_mult: float = Field(
+        ...,
+        gt=0,
+        description="Multiplicateur de l'ATR pour définir le Take-Profit.",
+    )
 
-class PsarReversalOtocoOptimizableParams(BaseOptimizableParams):
-    psar_step: float = Field(0.02, gt=0, description="Le pas (step) pour l'indicateur PSAR.")
-    psar_max_step: float = Field(0.2, gt=0, description="Le pas maximum (max step) pour l'indicateur PSAR.")
-    risk_reward_ratio: float = Field(2.0, gt=0, description="Ratio risque/rendement.")
+# --- Paramètres pour BbandsVolumeRsiStrategy ---
 
-# --- Paramètres pour TripleMaAnticipationStrategy ---
-class TripleMaAnticipationFixedParams(BaseFixedParams):
-    pass
 
-class TripleMaAnticipationOptimizableParams(BaseOptimizableParams):
-    fast_ma_period: int = Field(5, gt=0, description="Période de la MA rapide.")
-    medium_ma_period: int = Field(8, gt=0, description="Période de la MA intermédiaire.")
-    slow_ma_period: int = Field(13, gt=0, description="Période de la MA lente.")
-    atr_period_sl: int = Field(14, gt=0, description="Période de l'ATR pour le stop-loss.")
-    atr_multiplier_sl: float = Field(2.0, gt=0, description="Multiplicateur de l'ATR pour le stop-loss.")
-    risk_reward_ratio: float = Field(1.5, gt=0, description="Ratio risque/rendement.")
+class BbandsVolumeRsiStrategyFixedParams(StopLossTakeProfitParams):
+    """Paramètres fixes pour la stratégie BbandsVolumeRsiStrategy."""
 
-# --- Paramètres pour BbandsVolumeRsiStrategy (Version Breakout) ---
-class BbandsVolumeRsiStrategyFixedParams(BaseFixedParams):
-    """
-    Paramètres fixes pour la stratégie. La plupart des paramètres de cette
-    stratégie sont optimisables, donc cette classe est vide pour le moment.
-    """
-    pass
+    pass  # Hérite déjà de sl_atr_mult et tp_atr_mult
+
 
 class BbandsVolumeRsiStrategyOptimizableParams(BaseOptimizableParams):
+    """Paramètres optimisables pour la stratégie BbandsVolumeRsiStrategy."""
+
+    bbands_period: int = Field(..., gt=1, description="Période des Bandes de Bollinger.")
+    bbands_std_dev: float = Field(
+        ..., gt=0, description="Écart-type des Bandes de Bollinger."
+    )
+    volume_ma_period: int = Field(
+        ..., gt=1, description="Période de la MM du volume."
+    )
+    rsi_period: int = Field(..., gt=1, description="Période du RSI.")
+    rsi_buy_breakout_threshold: int = Field(
+        ..., gt=50, lt=100, description="Seuil RSI pour cassure haussière."
+    )
+    rsi_sell_breakout_threshold: int = Field(
+        ..., gt=0, lt=50, description="Seuil RSI pour cassure baissière."
+    )
+    atr_period: int = Field(..., gt=1, description="Période de l'ATR.")
+
+    @validator("rsi_buy_breakout_threshold")
+    def rsi_buy_must_be_greater(cls, v, values):
+        if "rsi_sell_breakout_threshold" in values and v <= values["rsi_sell_breakout_threshold"]:
+            raise ValueError(
+                "rsi_buy_breakout_threshold doit être supérieur à rsi_sell_breakout_threshold"
+            )
+        return v
+
+# --- Fonction pour Optuna ---
+
+
+def suggest_params_from_config(
+    trial: optuna.trial.Trial, params_config: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
     """
-    Paramètres optimisables pour la stratégie de cassure (breakout)
-    basée sur les Bandes de Bollinger, le Volume et le RSI.
+    Suggère des hyperparamètres pour une étude Optuna à partir d'un dictionnaire de configuration.
+
+    Args:
+        trial: L'objet Trial d'Optuna pour l'itération en cours.
+        params_config: Un dictionnaire où chaque clé est le nom du paramètre et
+                       la valeur est un autre dictionnaire spécifiant le type de
+                       suggestion et ses bornes (low, high, step, choices).
+
+    Returns:
+        Un dictionnaire contenant les paramètres suggérés pour cet essai.
+    
+    Raises:
+        ValueError: Si un type de suggestion non supporté est rencontré.
     """
-    bbands_period: int = Field(20, gt=1, description="Période pour les Bandes de Bollinger.")
-    bbands_std_dev: float = Field(2.0, gt=0, description="Écart-type pour les Bandes de Bollinger.")
-    volume_ma_period: int = Field(20, gt=1, description="Période pour la moyenne mobile du volume.")
-    rsi_period: int = Field(14, gt=1, description="Période pour le RSI.")
-    rsi_buy_breakout_threshold: float = Field(60.0, ge=50, le=100, description="Seuil RSI pour confirmer une cassure haussière.")
-    rsi_sell_breakout_threshold: float = Field(40.0, ge=0, le=50, description="Seuil RSI pour confirmer une cassure baissière.")
-    atr_period: int = Field(14, gt=1, description="Période pour le calcul de l'ATR.")
-    sl_atr_mult: float = Field(1.5, gt=0, description="Multiplicateur ATR pour le Stop-Loss.")
-    tp_atr_mult: float = Field(3.0, gt=0, description="Multiplicateur ATR pour le Take-Profit.")
+    suggested_params = {}
+    for param_name, config in params_config.items():
+        suggestion_type = config.get("type")
+
+        if suggestion_type == "int":
+            low = config["low"]
+            high = config["high"]
+            step = config.get("step", 1)
+            suggested_params[param_name] = trial.suggest_int(
+                param_name, low, high, step=step
+            )
+        elif suggestion_type == "float":
+            low = config["low"]
+            high = config["high"]
+            step = config.get("step")  # Peut être None
+            suggested_params[param_name] = trial.suggest_float(
+                param_name, low, high, step=step
+            )
+        elif suggestion_type == "categorical":
+            choices = config["choices"]
+            suggested_params[param_name] = trial.suggest_categorical(
+                param_name, choices
+            )
+        else:
+            error_msg = f"Type de suggestion non supporté '{suggestion_type}' pour le paramètre '{param_name}'."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    logger.debug(f"Paramètres suggérés pour l'essai {trial.number}: {suggested_params}")
+    return suggested_params

@@ -1,4 +1,5 @@
 # src/core/exceptions.py
+
 from typing import Optional, Any
 
 class AlgoBotException(Exception):
@@ -134,11 +135,11 @@ class StrategyLoadError(StrategyError):
     pass
 
 # --- Backtesting Exceptions ---
+# --- CORRECTION : Les classes suivantes étaient manquantes ou mal définies ---
 class BacktestError(AlgoBotException):
     """Erreur générale liée au processus de backtesting."""
     pass
 
-# CLASSE AJOUTÉE CI-DESSOUS
 class BacktestFailureError(BacktestError):
     """Erreur levée quand un backtest ne peut pas être complété (ex: aucun trade)."""
     pass
@@ -153,6 +154,7 @@ class InsufficientDataForBacktestError(BacktestError):
         super().__init__(message, original_exception, required_period=required_period, available_period=available_period, **kwargs)
         self.required_period = required_period
         self.available_period = available_period
+# --- FIN DE LA CORRECTION ---
 
 # --- Optimization Exceptions ---
 class OptimizationError(AlgoBotException):
