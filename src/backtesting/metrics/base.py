@@ -1,87 +1,81 @@
+# src/backtesting/metrics/base.py
+
 """
-Module contenant la classe de base pour les métriques de performance.
+Defines the abstract base class for all performance metrics.
+
+This module provides the `Metric` interface, which establishes a standard
+contract for calculating performance and risk metrics from backtest results.
+This allows for a modular and extensible system where new metrics can be
+easily added and calculated independently.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Any, Dict
+
 import pandas as pd
-import vectorbt as vbt
-import logging
 
-logger = logging.getLogger(__name__)
+from src.backtesting.portfolio.portfolio import Portfolio
 
 
-class BaseMetric(ABC):
+class Metric(ABC):
     """
-    Classe abstraite de base pour les métriques de performance.
-    Toutes les métriques spécifiques doivent hériter de cette classe.
-    """
+    An abstract base class that defines the contract for a performance metric.
     
+    A metric is a stateless function that takes the results of a backtest
+    (such as the equity curve and transaction history) and computes a specific
+    scalar value or a series of values.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """
+        Provides the unique, machine-readable name of the metric
+        (e.g., "sharpe_ratio", "max_drawdown").
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """
+        Provides a brief, human-readable description of what the metric measures.
+        """
+        raise NotImplementedError
+
     @property
     @abstractmethod
     def category(self) -> str:
         """
-        Retourne la catégorie de la métrique.
-        
-        Returns:
-            str: Catégorie de la métrique (e.g. 'Returns', 'Risk', 'Trade')
+        Specifies the category of the metric (e.g., "Returns", "Risk", "Trades").
         """
-        pass
-    
+        raise NotImplementedError
+
     @abstractmethod
-    def calculate(self, portfolio: vbt.Portfolio, **kwargs) -> Dict[str, Any]:
+    def calculate(
+        self,
+        equity_curve: pd.Series,
+        portfolio: Portfolio,
+        benchmark_returns: Optional[pd.Series] = None,
+        **kwargs: Any
+    ) -> Any:
         """
-        Calcule les métriques spécifiques pour un portfolio VectorBT.
-        
+        Calculates the metric's value.
+
         Args:
-            portfolio: Portfolio VectorBT pour lequel calculer les métriques
-            **kwargs: Arguments supplémentaires spécifiques à la métrique
-            
+            equity_curve (pd.Series): The portfolio's value over time.
+                                      The index is a datetime, and values are floats.
+            portfolio (Portfolio): The final portfolio object, containing transaction
+                                   history and other state information.
+            benchmark_returns (Optional[pd.Series]): A series of benchmark returns,
+                                                      aligned with the equity curve's
+                                                      index, for calculating relative
+                                                      metrics like Beta or Alpha.
+            **kwargs: Additional parameters, such as the risk-free rate, required
+                      by specific metric calculations.
+
         Returns:
-            Dict[str, Any]: Dictionnaire contenant les métriques calculées
+            Any: The calculated metric value. This can be a float, int, str,
+                 or even a more complex object like a dictionary.
         """
-        pass
-    
-    def _handle_calculation_error(self, metric_name: str, error: Exception) -> Optional[float]:
-        """
-        Gère les erreurs lors du calcul des métriques.
-        
-        Args:
-            metric_name: Nom de la métrique qui a échoué
-            error: Exception levée pendant le calcul
-            
-        Returns:
-            Optional[float]: None en cas d'erreur, pour être remplacé par NaN dans le résultat
-        """
-        logger.warning(f"Erreur lors du calcul de la métrique '{metric_name}': {error}")
-        return None
-    
-    def _format_metric_name(self, base_name: str) -> str:
-        """
-        Formate le nom d'une métrique selon une convention standard.
-        
-        Args:
-            base_name: Nom de base de la métrique
-            
-        Returns:
-            str: Nom formaté de la métrique
-        """
-        category_prefix = self.category.lower()
-        return f"{category_prefix}_{base_name}"
-    
-    def _safe_calculate(self, metric_func, metric_name: str, *args, **kwargs) -> Any:
-        """
-        Exécute une fonction de calcul de métrique avec gestion d'erreur.
-        
-        Args:
-            metric_func: Fonction à exécuter
-            metric_name: Nom de la métrique (pour le log en cas d'erreur)
-            *args, **kwargs: Arguments à passer à la fonction
-            
-        Returns:
-            Any: Résultat du calcul ou None en cas d'erreur
-        """
-        try:
-            return metric_func(*args, **kwargs)
-        except Exception as e:
-            return self._handle_calculation_error(metric_name, e)
+        raise NotImplementedError

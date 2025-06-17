@@ -1,124 +1,171 @@
-from typing import Dict, Any, Optional, Union
-import numpy as np
+# src/strategies/implementations/psar_reversal_otoco_strategy_impl.py
+
+"""
+A reversal strategy based on the Parabolic SAR (PSAR) indicator.
+"""
+
+from typing import Dict, List, Any
+
 import pandas as pd
-from loguru import logger
-from pydantic import Field
-import numpy as np
+import pandas_ta as ta
 
+from src.core.exceptions import IndicatorError
 from src.strategies.base import BaseStrategy
-from src.core.exceptions import SignalGenerationError
-from src.strategies.params import BaseFixedParams, BaseOptimizableParams
-from src.data.enriched_dataframe import EnrichedDataFrame
-from src.strategies import technical_indicators as ti
+from src.strategies.indicators.base import Indicator
+from src.strategies.indicators.registry import register_indicator, IndicatorRegistry
+from src.strategies.parameters import (
+    ParameterSet,
+    FloatParameter,
+    IntParameter,
+    BoolParameter,
+)
+from src.strategies.signals import (
+    Signal,
+    SignalDirection,
+    SignalType,
+)
 
-class PsarReversalOtocoFixedParams(BaseFixedParams):
-    indicator_frequency: str = Field(default='1h', description="Fréquence pour le calcul des indicateurs.")
 
-class PsarReversalOtocoOptimizableParams(BaseOptimizableParams):
-    psar_inc: float = Field(default=0.02, gt=0, description="Incrément pour le Parabolic SAR.")
-    psar_max: float = Field(default=0.2, gt=0, description="Valeur maximale pour le Parabolic SAR.")
-    atr_period: int = Field(default=14, gt=0, description="Période de l'ATR pour le calcul du SL/TP.")
-    atr_multiplier_sl: float = Field(default=2.0, gt=0, description="Multiplicateur de l'ATR pour le Stop Loss.")
-    atr_multiplier_tp: float = Field(default=3.0, gt=0, description="Multiplicateur de l'ATR pour le Take Profit.")
-    otoco_candle_body_ratio_thld: float = Field(default=0.7, ge=0, le=1, description="Seuil du ratio corps/range pour le pattern OTOCO.")
-    otoco_wick_ratio_thld: float = Field(default=0.1, ge=0, le=1, description="Seuil du ratio mèche/range pour le pattern OTOCO.")
-    position_sizing_pct_capital: float = Field(default=0.01, gt=0, lt=1, description="Pourcentage du capital à risquer par trade.")
+# NOTE: The PSAR indicator is defined here temporarily for self-containment,
+# as it was not in the initial indicator files. In a final structure, this
+# would be in its own file (e.g., `strategies/indicators/technical/trend.py`).
+@register_indicator(name="psar")
+class PSARIndicator(Indicator):
+    """Calculates the Parabolic Stop and Reverse (PSAR)."""
 
-class PsarReversalOtocoStrategy(BaseStrategy):
-    name: str = "PsarReversalOtocoStrategy"
-    version: str = "3.6.0" # Version mise à jour
-    description: str = "Combine les retournements de PSAR avec le pattern OTOCO pour confirmation."
+    @property
+    def name(self) -> str:
+        return "psar"
+    @property
+    def description(self) -> str:
+        return "Calculates Parabolic SAR and its reversal points."
+    @property
+    def category(self) -> str:
+        return "Trend"
+    @property
+    def required_input_names(self) -> List[str]:
+        return ["high", "low"]
 
-    fixed_params_model = PsarReversalOtocoFixedParams
-    optimizable_params_model = PsarReversalOtocoOptimizableParams
+    @classmethod
+    def get_parameters(cls) -> ParameterSet:
+        return ParameterSet([
+            FloatParameter("initial_af", 0.02, 0.01, 0.1, help="Initial acceleration factor."),
+            FloatParameter("af_increment", 0.02, 0.01, 0.1, help="Acceleration factor increment."),
+            FloatParameter("max_af", 0.2, 0.1, 0.5, help="Maximum acceleration factor."),
+        ])
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None, **kwargs):
-        self.pair_symbol = kwargs.get('pair_symbol', 'PAIR_UNSPECIFIED')
-        self.strategy_name_log_prefix = f"[{self.name}][{self.pair_symbol}]"
-        super().__init__(params, **kwargs)
+    def calculate(self, data: pd.DataFrame) -> Dict[str, pd.Series]:
+        try:
+            psar_df = ta.psar(
+                data["high"],
+                data["low"],
+                af0=self.get_param("initial_af"),
+                af=self.get_param("af_increment"),
+                max_af=self.get_param("max_af"),
+            )
+            if psar_df is None or psar_df.empty:
+                raise IndicatorError("pandas_ta.psar returned None or an empty DataFrame.")
+        except Exception as e:
+            raise IndicatorError("Error calculating PSAR.") from e
         
-        self.required_timeframes = [self.get_param('indicator_frequency')]
-        self.min_required_periods = self.get_param('atr_period') + 2
-        logger.info(f"{self.strategy_name_log_prefix} Stratégie initialisée.")
-    
-    def calculate_indicators(self, data: Union[Dict[str, pd.DataFrame], EnrichedDataFrame]) -> pd.DataFrame:
-        log_pref = self.strategy_name_log_prefix
-        df = self._prepare_indicator_data(data)
-        freq = self.get_param('indicator_frequency')
+        # We are interested in the reversal column `PSARr...`
+        reversal_col = next((col for col in psar_df.columns if 'PSARr' in col), None)
+        if reversal_col is None:
+            raise IndicatorError("Could not find reversal column in PSAR output.")
+
+        return {"psar_reversal": psar_df[reversal_col]}
+
+
+class PSARReversalStrategy(BaseStrategy):
+    """
+    Implements a strategy based on PSAR reversals for entries.
+    It uses ATR to set a Stop-Loss and Take-Profit (OTOCO).
+    """
+    def __init__(self, symbol: str, params: Dict[str, Any]):
+        self.params = self.get_parameters().validate(params)
+        self.symbol = symbol
+
+    @property
+    def name(self) -> str:
+        return "PSARReversal"
+
+    @property
+    def description(self) -> str:
+        return "A reversal strategy using PSAR flips and ATR for SL/TP."
+
+    @classmethod
+    def get_parameters(cls) -> ParameterSet:
+        """Defines the parameters for this strategy."""
+        return ParameterSet([
+            # PSAR parameters
+            FloatParameter("initial_af", 0.02, 0.01, 0.1, help="PSAR Initial acceleration factor."),
+            FloatParameter("af_increment", 0.02, 0.01, 0.1, help="PSAR Acceleration factor increment."),
+            FloatParameter("max_af", 0.2, 0.1, 0.5, help="PSAR Maximum acceleration factor."),
+            # OTOCO (SL/TP) parameters
+            BoolParameter("use_otoco", True, help="Whether to use ATR for SL/TP calculation."),
+            IntParameter("atr_period", 14, 5, 50, help="Period for the ATR calculation."),
+            FloatParameter("atr_multiplier_sl", 2.0, 1.0, 5.0, help="ATR multiplier for stop-loss."),
+            FloatParameter("atr_multiplier_tp", 4.0, 1.0, 10.0, help="ATR multiplier for take-profit."),
+        ])
+
+    def calculate_indicators(self, data: pd.DataFrame) -> Dict[str, pd.Series]:
+        """Calculates all indicators required by the strategy."""
+        indicators = {}
         
-        # Détermination des colonnes sources
-        close_col = f"K_{freq}_close" if f"K_{freq}_close" in df.columns else "close"
-        high_col = f"K_{freq}_high" if f"K_{freq}_high" in df.columns else "high"
-        low_col = f"K_{freq}_low" if f"K_{freq}_low" in df.columns else "low"
-        open_col = f"K_{freq}_open" if f"K_{freq}_open" in df.columns else "open"
-
-        required_cols = [open_col, high_col, low_col, close_col]
-        if not all(c in df.columns for c in required_cols):
-            raise SignalGenerationError(f"Colonnes OHLC manquantes. Attendu: {required_cols}", self.name)
+        psar_indicator = IndicatorRegistry.create(
+            "psar",
+            initial_af=self.params["initial_af"],
+            af_increment=self.params["af_increment"],
+            max_af=self.params["max_af"],
+        )
+        indicators.update(psar_indicator.calculate(data))
         
-        # Création d'un DataFrame temporaire avec les noms de colonnes standardisés
-        temp_df = df[required_cols].rename(columns={
-            open_col: 'open', high_col: 'high', low_col: 'low', close_col: 'close'
-        })
-
-        # Calcul des indicateurs
-        psar_df = ti.calculate_psar(temp_df['high'], temp_df['low'], temp_df['close'], 
-                                    acceleration=self.get_param('psar_inc'), 
-                                    maximum=self.get_param('psar_max'))
-        # Renomme la colonne PSAR pour la simplicité (pandas-ta peut retourner plusieurs colonnes)
-        psar_col_name = next((col for col in psar_df.columns if 'psarl' in col.lower()), 'psar')
-        psar_df.rename(columns={psar_col_name: 'psar'}, inplace=True)
-
-        atr = ti.calculate_atr(temp_df['high'], temp_df['low'], temp_df['close'], period=self.get_param('atr_period'))
-        
-        otoco = ti.calculate_otoco_pattern(temp_df, 
-                                           self.get_param('otoco_candle_body_ratio_thld'), 
-                                           self.get_param('otoco_wick_ratio_thld'))
-
-        # Concaténation et jointure
-        indicators_df = pd.concat([psar_df['psar'], atr, otoco], axis=1)
-        final_df = df.join(indicators_df)
-
-        if 'close' not in final_df.columns:
-            final_df['close'] = final_df[close_col]
-
-        self._indicators_cache = final_df
-        logger.info(f"{log_pref} Indicateurs calculés.")
-        return final_df
-
-    def generate_signals(self, indicators_df: pd.DataFrame) -> pd.DataFrame:
-        df = indicators_df.copy()
+        if self.params["use_otoco"]:
+            atr_indicator = IndicatorRegistry.create("atr", period=self.params["atr_period"])
+            indicators.update(atr_indicator.calculate(data))
             
-        required_cols = ['close', 'psar', 'otoco_long', 'otoco_short', 'atr']
-        if not all(col in df.columns for col in required_cols):
-            missing = [col for col in required_cols if col not in df.columns]
-            raise SignalGenerationError(f"Colonnes requises manquantes: {missing}", strategy_name=self.name)
-        
-        df['psar_reversal_up'] = (df['close'] > df['psar']) & (df['close'].shift(1) < df['psar'].shift(1))
-        df['psar_reversal_down'] = (df['close'] < df['psar']) & (df['close'].shift(1) > df['psar'].shift(1))
+        return indicators
 
-        df['entry_long'] = df['psar_reversal_up'] & df['otoco_long']
-        df['entry_short'] = df['psar_reversal_down'] & df['otoco_short']
-        
-        df['exit_long'] = df['psar_reversal_down']
-        df['exit_short'] = df['psar_reversal_up']
+    def generate_signals(self, data: pd.DataFrame, indicators: Dict[str, pd.Series]) -> List[Signal]:
+        """Generates trading signals based on PSAR reversals."""
+        signals = []
+        reversals = indicators["psar_reversal"]
 
-        sl_mult = self.get_param('atr_multiplier_sl')
-        tp_mult = self.get_param('atr_multiplier_tp')
+        long_condition = (reversals == 1)
+        short_condition = (reversals == -1)
 
-        df['sl'] = np.nan
-        df['tp'] = np.nan
+        long_entry_points = data.loc[long_condition]
+        short_entry_points = data.loc[short_condition]
 
-        long_entries = df['entry_long']
-        df.loc[long_entries, 'sl'] = df['close'] - (df['atr'] * sl_mult)
-        df.loc[long_entries, 'tp'] = df['close'] + (df['atr'] * tp_mult)
+        for timestamp, row in long_entry_points.iterrows():
+            stop_loss, take_profit = None, None
+            if self.params["use_otoco"] and "atr" in indicators:
+                atr_value = indicators["atr"].get(timestamp)
+                if atr_value is not None:
+                    stop_loss = row["close"] - (atr_value * self.params["atr_multiplier_sl"])
+                    take_profit = row["close"] + (atr_value * self.params["atr_multiplier_tp"])
+            
+            signals.append(Signal(
+                strategy_name=self.name, symbol=self.symbol, timestamp=timestamp,
+                direction=SignalDirection.LONG, signal_type=SignalType.ENTRY,
+                price=row["close"], stop_loss=stop_loss, take_profit=take_profit,
+                metadata={"psar_reversal": 1}
+            ))
 
-        short_entries = df['entry_short']
-        df.loc[short_entries, 'sl'] = df['close'] + (df['atr'] * sl_mult)
-        df.loc[short_entries, 'tp'] = df['close'] - (df['atr'] * tp_mult)
-        
-        # Renomme les colonnes de signaux pour la compatibilité avec vectorbt
-        final_signals = df[['entry_long', 'exit_long', 'entry_short', 'exit_short', 'sl', 'tp']]
-        
-        self._signals = final_signals
-        return self._signals.copy()
+        for timestamp, row in short_entry_points.iterrows():
+            stop_loss, take_profit = None, None
+            if self.params["use_otoco"] and "atr" in indicators:
+                atr_value = indicators["atr"].get(timestamp)
+                if atr_value is not None:
+                    stop_loss = row["close"] + (atr_value * self.params["atr_multiplier_sl"])
+                    take_profit = row["close"] - (atr_value * self.params["atr_multiplier_tp"])
+
+            signals.append(Signal(
+                strategy_name=self.name, symbol=self.symbol, timestamp=timestamp,
+                direction=SignalDirection.SHORT, signal_type=SignalType.ENTRY,
+                price=row["close"], stop_loss=stop_loss, take_profit=take_profit,
+                metadata={"psar_reversal": -1}
+            ))
+
+        signals.sort(key=lambda s: s.timestamp)
+        return signals

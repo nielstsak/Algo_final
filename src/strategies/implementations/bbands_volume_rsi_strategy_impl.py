@@ -1,199 +1,157 @@
-import logging
-import numpy as np
+# src/strategies/implementations/bbands_volume_rsi_strategy_impl.py
+
+"""
+A mean-reversion strategy combining Bollinger Bands, RSI, and volume.
+"""
+
+from typing import Dict, List, Any
+
 import pandas as pd
-from typing import Dict, Any, Optional, Union
 
 from src.strategies.base import BaseStrategy
-from src.strategies.params import (
-    BbandsVolumeRsiStrategyFixedParams,
-    BbandsVolumeRsiStrategyOptimizableParams,
+from src.strategies.indicators.registry import IndicatorRegistry
+from src.strategies.parameters import (
+    ParameterSet,
+    IntParameter,
+    FloatParameter,
+    BoolParameter,
 )
-from src.strategies import technical_indicators as ti
-from src.data.enriched_dataframe import EnrichedDataFrame
+from src.strategies.signals import (
+    Signal,
+    SignalDirection,
+    SignalType,
+)
 
-logger = logging.getLogger(__name__)
 
-
-class BbandsVolumeRsiStrategy(BaseStrategy):
+class BBandsVolumeRSIStrategy(BaseStrategy):
     """
-    Stratégie de trading basée sur la cassure (breakout) des Bandes de Bollinger,
-    confirmée par le volume et le RSI. La gestion des risques (Stop-Loss et
-    Take-Profit) est assurée dynamiquement par l'indicateur Average True Range (ATR).
+    Implements a mean-reversion strategy using Bollinger Bands and RSI.
 
-    Cette stratégie identifie des points d'entrée potentiels lorsque le prix clôture
-    au-dessus (pour un achat) ou en dessous (pour une vente) des Bandes de Bollinger,
-    avec un volume supérieur à sa moyenne mobile et un RSI confirmant la dynamique.
-
-    **Logique des signaux :**
-    - **Achat (Long) :**
-        1. Clôture du prix > Bande de Bollinger supérieure.
-        2. Volume > Moyenne mobile du volume.
-        3. RSI > Seuil de surachat (ex: 60).
-    - **Vente (Short) :**
-        1. Clôture du prix < Bande de Bollinger inférieure.
-        2. Volume > Moyenne mobile du volume.
-        3. RSI < Seuil de survente (ex: 40).
-
-    Le Stop-Loss et le Take-Profit sont calculés en utilisant un multiple de l'ATR
-    au moment de l'entrée pour s'adapter à la volatilité du marché.
+    - Entry Conditions:
+        - LONG: Price closes below the lower Bollinger Band and RSI is oversold.
+        - SHORT: Price closes above the upper Bollinger Band and RSI is overbought.
+    - Exit Conditions:
+        - This implementation only generates entry signals. Exits are expected
+          to be managed by the execution engine (e.g., via a trailing stop,
+          take profit, or a separate exit signal logic).
+    - Stop-Loss:
+        - Can optionally be calculated using ATR for dynamic risk management.
     """
 
-    name: str = "BbandsVolumeRsiStrategy"
-    version: str = "1.1.0"
-    description: str = (
-        "Bollinger Bands, Volume & RSI Breakout Strategy with ATR-based SL/TP."
-    )
-
-    fixed_params_model = BbandsVolumeRsiStrategyFixedParams
-    optimizable_params_model = BbandsVolumeRsiStrategyOptimizableParams
-
-    def __init__(self, params: Optional[Dict[str, Any]] = None, **kwargs):
-        """Initialise la stratégie avec des paramètres spécifiques."""
-        super().__init__(params=params, **kwargs)
-
-    def calculate_indicators(
-        self, data: Union[pd.DataFrame, EnrichedDataFrame]
-    ) -> pd.DataFrame:
+    def __init__(self, symbol: str, params: Dict[str, Any]):
         """
-        Calcule tous les indicateurs techniques nécessaires à la stratégie.
-        Cette méthode respecte la signature de la méthode abstraite de BaseStrategy.
+        Initializes the BBandsVolumeRSIStrategy.
 
         Args:
-            data: DataFrame ou EnrichedDataFrame contenant les données de marché (OHLCV).
-
-        Returns:
-            Un DataFrame contenant les données originales et les indicateurs calculés.
+            symbol (str): The symbol to be traded (e.g., 'BTC/USDT').
+            params (Dict[str, Any]): The parameters for the strategy instance.
         """
-        df = self._prepare_indicator_data(data)
-        if df.empty:
-            logger.warning(
-                "Le DataFrame de données est vide. Aucun indicateur ne sera calculé."
-            )
-            return pd.DataFrame()
+        self.params = self.get_parameters().validate(params)
+        self.symbol = symbol
 
-        # Calcul des Bandes de Bollinger
-        bbands_df = ti.calculate_bollinger_bands(
-            close_series=df["close"],
-            period=self.get_param("bbands_period"),
-            std_dev=self.get_param("bbands_std_dev"),
+    @property
+    def name(self) -> str:
+        return "BBandsVolumeRSI"
+
+    @property
+    def description(self) -> str:
+        return "A mean-reversion strategy using Bollinger Bands, RSI, and optional ATR stops."
+
+    @classmethod
+    def get_parameters(cls) -> ParameterSet:
+        """Defines the parameters required for this strategy."""
+        return ParameterSet([
+            # Bollinger Bands parameters
+            IntParameter("bb_period", 20, 5, 100, help="Period for the Bollinger Bands SMA."),
+            FloatParameter("bb_std_dev", 2.0, 1.0, 4.0, help="Standard deviations for the Bollinger Bands."),
+            # RSI parameters
+            IntParameter("rsi_period", 14, 5, 50, help="Period for the RSI calculation."),
+            IntParameter("rsi_oversold", 30, 10, 40, help="RSI level for oversold condition."),
+            IntParameter("rsi_overbought", 70, 60, 90, help="RSI level for overbought condition."),
+            # ATR Stop-Loss parameters
+            BoolParameter("use_atr_stop", True, help="Whether to use ATR for stop-loss calculation."),
+            IntParameter("atr_period", 14, 5, 50, help="Period for the ATR calculation."),
+            FloatParameter("atr_multiplier", 2.0, 1.0, 5.0, help="Multiplier for the ATR stop-loss distance."),
+        ])
+
+    def calculate_indicators(self, data: pd.DataFrame) -> Dict[str, pd.Series]:
+        """Calculates all indicators required by the strategy."""
+        indicators = {}
+
+        # Bollinger Bands
+        bb_indicator = IndicatorRegistry.create(
+            "bbands", period=self.params["bb_period"], std_dev=self.params["bb_std_dev"]
         )
+        indicators.update(bb_indicator.calculate(data))
 
-        # Calcul de la moyenne mobile du volume
-        volume_ma = ti.calculate_sma(
-            series=df["volume"], period=self.get_param("volume_ma_period")
-        )
-        volume_ma.name = "volume_ma"
-
-        # Calcul du RSI
-        rsi = ti.calculate_rsi(
-            close_series=df["close"], period=self.get_param("rsi_period")
-        )
-        rsi.name = "rsi"
-
-        # Calcul de l'ATR pour la gestion des risques
-        atr = ti.calculate_atr(
-            high_series=df["high"],
-            low_series=df["low"],
-            close_series=df["close"],
-            period=self.get_param("atr_period"),
-        )
-        atr.name = "atr"
-
-        # Fusion de tous les indicateurs dans un seul DataFrame
-        indicators_df = pd.concat([df, bbands_df, volume_ma, rsi, atr], axis=1)
-        logger.info(
-            "Indicateurs calculés avec succès pour la stratégie de breakout."
-        )
-        return indicators_df
-
-    def generate_signals(self, indicators_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Génère les signaux de trading (entrées, sorties, SL/TP) basés sur la
-        logique de la stratégie et les indicateurs fournis.
-
-        Args:
-            indicators_df: DataFrame contenant les données de marché et les indicateurs.
-
-        Returns:
-            Un DataFrame contenant les colonnes de signaux requises.
-        """
-        if indicators_df.empty:
-            logger.warning(
-                "Le DataFrame d'indicateurs est vide. Impossible de générer des signaux."
-            )
-            return pd.DataFrame()
-
-        df = indicators_df
-
-        # --- Conditions pour les signaux d'achat (Long) ---
-        long_breakout_cond = df["close"] > df["BBU"]
-        long_volume_cond = df["volume"] > df["volume_ma"]
-        long_rsi_cond = df["rsi"] > self.get_param("rsi_buy_breakout_threshold")
-
-        all_long_conditions = (
-            long_breakout_cond & long_volume_cond & long_rsi_cond
-        )
-
-        # On ne prend que la première occurrence de la condition
-        entry_long = all_long_conditions & ~all_long_conditions.shift(
-            1, fill_value=False
-        )
-
-        # --- Conditions pour les signaux de vente (Short) ---
-        short_breakout_cond = df["close"] < df["BBL"]
-        short_volume_cond = df["volume"] > df["volume_ma"]
-        short_rsi_cond = df["rsi"] < self.get_param(
-            "rsi_sell_breakout_threshold"
-        )
-
-        all_short_conditions = (
-            short_breakout_cond & short_volume_cond & short_rsi_cond
-        )
+        # RSI
+        rsi_indicator = IndicatorRegistry.create("rsi", period=self.params["rsi_period"])
+        indicators.update(rsi_indicator.calculate(data))
         
-        # On ne prend que la première occurrence de la condition
-        entry_short = all_short_conditions & ~all_short_conditions.shift(
-            1, fill_value=False
-        )
+        # ATR for stop-loss
+        if self.params["use_atr_stop"]:
+            atr_indicator = IndicatorRegistry.create("atr", period=self.params["atr_period"])
+            indicators.update(atr_indicator.calculate(data))
 
-        # --- Construction du DataFrame de signaux ---
-        signals = pd.DataFrame(index=df.index)
-        signals["entry_long"] = entry_long
-        signals["entry_short"] = entry_short
+        return indicators
+
+    def generate_signals(
+        self, data: pd.DataFrame, indicators: Dict[str, pd.Series]
+    ) -> List[Signal]:
+        """Generates trading signals based on the strategy's logic."""
+        signals = []
+        close = data["close"]
         
-        # Les signaux de sortie ne sont pas définis par cette stratégie,
-        # le backtest se basera sur SL/TP.
-        signals["exit_long"] = False
-        signals["exit_short"] = False
-
-        # --- Calcul des niveaux de Stop-Loss et Take-Profit ---
-        sl_atr_mult = self.get_param("sl_atr_mult")
-        tp_atr_mult = self.get_param("tp_atr_mult")
-
-        # SL/TP pour les positions longues
-        signals["sl_long"] = np.where(
-            entry_long, df["close"] - (df["atr"] * sl_atr_mult), np.nan
-        )
-        signals["tp_long"] = np.where(
-            entry_long, df["close"] + (df["atr"] * tp_atr_mult), np.nan
-        )
-
-        # SL/TP pour les positions courtes
-        signals["sl_short"] = np.where(
-            entry_short, df["close"] + (df["atr"] * sl_atr_mult), np.nan
-        )
-        signals["tp_short"] = np.where(
-            entry_short, df["close"] - (df["atr"] * tp_atr_mult), np.nan
-        )
+        # Extract indicator series
+        bbands_lower = indicators["bbands_lower"]
+        bbands_upper = indicators["bbands_upper"]
+        rsi = indicators["rsi"]
         
-        # Fusionner les colonnes SL/TP pour le backtesting engine
-        signals["sl"] = signals["sl_long"].fillna(signals["sl_short"])
-        signals["tp"] = signals["tp_long"].fillna(signals["tp_short"])
+        # Define conditions using vectorized operations
+        long_condition = (close < bbands_lower) & (rsi < self.params["rsi_oversold"])
+        short_condition = (close > bbands_upper) & (rsi > self.params["rsi_overbought"])
 
-        signals.drop(
-            columns=["sl_long", "tp_long", "sl_short", "tp_short"], inplace=True
-        )
+        # Filter data points where signals occur
+        long_entry_points = data.loc[long_condition]
+        short_entry_points = data.loc[short_condition]
 
-        logger.info(
-            f"Signaux générés : {entry_long.sum()} signaux d'achat, {entry_short.sum()} signaux de vente."
-        )
+        # Create LONG signals
+        for timestamp, row in long_entry_points.iterrows():
+            stop_loss = None
+            if self.params["use_atr_stop"] and "atr" in indicators:
+                atr_value = indicators["atr"].get(timestamp)
+                if atr_value is not None:
+                    stop_loss = row["close"] - (atr_value * self.params["atr_multiplier"])
+            
+            signals.append(Signal(
+                strategy_name=self.name,
+                symbol=self.symbol,
+                timestamp=timestamp,
+                direction=SignalDirection.LONG,
+                signal_type=SignalType.ENTRY,
+                price=row["close"],
+                stop_loss=stop_loss,
+                metadata={k: v.get(timestamp) for k, v in indicators.items()}
+            ))
+
+        # Create SHORT signals
+        for timestamp, row in short_entry_points.iterrows():
+            stop_loss = None
+            if self.params["use_atr_stop"] and "atr" in indicators:
+                atr_value = indicators["atr"].get(timestamp)
+                if atr_value is not None:
+                    stop_loss = row["close"] + (atr_value * self.params["atr_multiplier"])
+
+            signals.append(Signal(
+                strategy_name=self.name,
+                symbol=self.symbol,
+                timestamp=timestamp,
+                direction=SignalDirection.SHORT,
+                signal_type=SignalType.ENTRY,
+                price=row["close"],
+                stop_loss=stop_loss,
+                metadata={k: v.get(timestamp) for k, v in indicators.items()}
+            ))
+            
+        signals.sort(key=lambda s: s.timestamp)
         return signals
